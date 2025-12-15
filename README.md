@@ -1,4 +1,6 @@
-目录结构说明
+目前实现了 ingest（原始数据读取与抽取），clean（基础清洗与规则过滤），还有一个下载 CommonCrawl 的脚本 `download-cc.sh`。
+
+整体目录结构说明
 ```
 llm-data-pipeline/
 ├─ configs/                         # 各环境配置：输入/输出路径、Ray 并行度、阈值、step 开关、tokenizer 配置
