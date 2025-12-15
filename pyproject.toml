@@ -1,0 +1,33 @@
+[project]
+name = "llm-data-pipeline"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "QingGo", email = "zyqingjohn@qq.com" }
+]
+requires-python = ">=3.12"
+dependencies = [
+    "datasketch>=1.8.0",
+    "langid>=1.1.6",
+    "pyarrow>=22.0.0",
+    "pyyaml>=6.0.3",
+    "ray[data]>=2.52.1",
+    "sentencepiece>=0.2.1",
+    "tiktoken>=0.12.0",
+    "warcio>=1.7.5",
+    "xxhash>=3.6.0",
+]
+
+[project.scripts]
+llm-data-pipeline = "llm_data_pipeline:main"
+
+[build-system]
+requires = ["uv_build>=0.8.17,<0.9.0"]
+build-backend = "uv_build"
+
+[dependency-groups]
+dev = [
+    "pytest>=9.0.2",
+    "ruff>=0.14.9",
+]
