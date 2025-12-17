@@ -1,6 +1,41 @@
 import fasttext
+import fasttext.FastText
+import numpy as np
 from dataclasses import dataclass
 from typing import List, Optional
+
+
+# Monkey patch fasttext to fix numpy 2.0 compatibility
+# fasttext 0.9.3 uses np.array(probs, copy=False) which fails in numpy 2.0
+# when the array needs to be copied (e.g. from list).
+# We replace the predict method with a fixed version using np.asarray.
+def _patched_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
+    def check(entry):
+        if entry.find("\n") != -1:
+            raise ValueError("predict processes one line at a time (remove '\\n')")
+        entry += "\n"
+        return entry
+
+    if type(text) == list:
+        text = [check(entry) for entry in text]
+        all_labels, all_probs = self.f.multilinePredict(
+            text, k, threshold, on_unicode_error
+        )
+        return all_labels, all_probs
+    else:
+        text = check(text)
+        predictions = self.f.predict(text, k, threshold, on_unicode_error)
+        if predictions:
+            probs, labels = zip(*predictions)
+        else:
+            probs, labels = ([], ())
+
+        # Fix for numpy 2.0: use np.asarray instead of np.array(..., copy=False)
+        return labels, np.asarray(probs)
+
+
+fasttext.FastText._FastText.predict = _patched_predict
+
 
 
 @dataclass
