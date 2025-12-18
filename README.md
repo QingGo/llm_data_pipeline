@@ -1,4 +1,4 @@
-目前实现了 ingest（原始数据读取与抽取），clean（基础清洗与规则过滤），还有一个下载 CommonCrawl 的脚本 `download-cc.sh`。
+目前实现了 ingest（原始数据读取与抽取），clean（基础清洗与规则过滤），，还有一个下载 CommonCrawl 的脚本 `download-cc.sh`。以及部分实现 quality（质量评估与过滤），dedup（去重模块）。
 
 整体目录结构说明
 ```
