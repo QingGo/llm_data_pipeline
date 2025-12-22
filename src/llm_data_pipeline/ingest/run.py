@@ -44,7 +44,7 @@ def main() -> None:
     files = discover_files(data_dir, args.pattern)
     if args.max_files and args.max_files > 0:
         files = files[: args.max_files]
-
+    
     cfg = IngestConfig(
         min_text_chars=args.min_text_chars,
         max_text_chars=args.max_text_chars,
@@ -53,7 +53,7 @@ def main() -> None:
 
     # 注意：这里不 read_binary_files（避免把大文件 bytes 搬进 object store）
     # 直接把“路径列表”做成 dataset，再在 worker 上打开文件解析。
-    ds_files = rd.from_items([{"path": str(p)} for p in files])
+    ds_files = rd.from_items([{"path": str(p.absolute())} for p in files])
 
     compute = rd.TaskPoolStrategy(size=args.taskpool_size) if args.taskpool_size else None
 
@@ -62,9 +62,9 @@ def main() -> None:
         compute=compute,
         num_cpus=args.num_cpus,
     )
-
-    Path(args.output).mkdir(parents=True, exist_ok=True)
-    ds_docs.write_parquet(args.output)
+    output_path = Path(args.output)
+    output_path.mkdir(parents=True, exist_ok=True)
+    ds_docs.write_parquet(output_path.absolute())
 
     print("files =", len(files))
     print("docs_count =", ds_docs.count())

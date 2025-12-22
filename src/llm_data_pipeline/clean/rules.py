@@ -24,8 +24,8 @@ class CleanRules:
 def basic_clean(text: str) -> str:
     """统一换行并压缩多余空行"""
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    while "\n\n\n" in text:
-        text = text.replace("\n\n\n", "\n\n")
+    # 使用正则表达式替代while循环，一次性将3个及以上连续换行压缩为2个
+    text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 
 
