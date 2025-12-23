@@ -69,6 +69,7 @@ def train_sentencepiece_py(
         split_by_number=True,
         remove_extra_whitespaces=True,
         normalization_rule_name="nmt_nfkc",
+        num_threads=16,
         unk_id=0,
         bos_id=1,
         eos_id=2,
@@ -130,7 +131,7 @@ def main():
     ap.add_argument(
         "--model_prefix",
         type=str,
-        default="./outputs/dev/tokenizers/spm32k/spm_unigram_32k",
+        default="./outputs/dev/tokenizers/spm32k/spm_32k",
     )
     ap.add_argument("--vocab_size", type=int, default=32000)
     ap.add_argument("--num_shards", type=int, default=256)
@@ -139,11 +140,10 @@ def main():
     ap.add_argument(
         "--model_type",
         type=str,
-        default="unigram",
+        default="bpe",
         choices=["unigram", "bpe", "char", "word"],
     )
     ap.add_argument("--character_coverage", type=float, default=0.9995)
-    ap.add_argument("--llama3_model_id", type=str, default="meta-llama/Meta-Llama-3-8B-Instruct")
     ap.add_argument(
         "--sample_text",
         type=str,
