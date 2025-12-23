@@ -2,11 +2,10 @@ import argparse
 from dataclasses import dataclass
 from typing import Dict, List, Optional
 
-import ray
 import pyarrow as pa
 import pyarrow.compute as pc
+import ray
 from ray.data import ActorPoolStrategy
-
 
 # -------------------------
 # RE2-compatible regexes (PyArrow uses RE2)
@@ -47,7 +46,7 @@ HAS_CJK_RE = r"[\u4e00-\u9fff]"
 class Config:
     text_col: str = "text"
     lang_col: Optional[str] = None  # if exists, use it to route NER language
-    keep_stats: bool = False        # keep pii_* columns in output
+    keep_stats: bool = False  # keep pii_* columns in output
     enable_person_ner: bool = True
     # NER languages to attempt (others skip PERSON redaction)
     supported_langs: Optional[List[str]] = None
@@ -66,6 +65,7 @@ class StructuredPIIRedactor:
       - ner_lang (string) if NER enabled (route language for Presidio)
       - optional stats columns if keep_stats enabled
     """
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
@@ -159,6 +159,7 @@ class PresidioPersonNER:
     Slow path: Presidio AnalyzerEngine + AnonymizerEngine for PERSON -> <NAME>.
     Use ActorPoolStrategy so models are loaded once per actor.
     """
+
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
@@ -185,9 +186,11 @@ class PresidioPersonNER:
         # Build NLP engine with multi-language spaCy models
         nlp_configuration = {
             "nlp_engine_name": "spacy",
-            "models": [{"lang_code": lang, "model_name": self.cfg.spacy_models[lang]}
-                       for lang in self.cfg.supported_langs
-                       if lang in self.cfg.spacy_models],
+            "models": [
+                {"lang_code": lang, "model_name": self.cfg.spacy_models[lang]}
+                for lang in self.cfg.supported_langs
+                if lang in self.cfg.spacy_models
+            ],
         }
         provider = NlpEngineProvider(nlp_configuration)
         nlp_engine = provider.create_engine()
@@ -250,11 +253,17 @@ class PresidioPersonNER:
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Ray Data + Arrow/RE2 + Presidio PII redaction to Parquet.")
-    p.add_argument("--input", default='outputs/dev/cleaned_parquet', help="Input parquet path (local://, s3://, gs://, etc.)")
-    p.add_argument("--output", default='outputs/dev/pii_parquet', help="Output parquet directory")
+    p.add_argument(
+        "--input", default="outputs/dev/cleaned_parquet", help="Input parquet path (local://, s3://, gs://, etc.)"
+    )
+    p.add_argument("--output", default="outputs/dev/pii_parquet", help="Output parquet directory")
     p.add_argument("--text-col", default="text", help="Text column name (default: text)")
-    p.add_argument("--lang-col", default="", help="Optional language column (e.g. lang). If missing/empty, heuristic en/zh.")
-    p.add_argument("--num-blocks", type=int, default=0, help="Repartition to this many blocks (controls output file count)")
+    p.add_argument(
+        "--lang-col", default="", help="Optional language column (e.g. lang). If missing/empty, heuristic en/zh."
+    )
+    p.add_argument(
+        "--num-blocks", type=int, default=0, help="Repartition to this many blocks (controls output file count)"
+    )
     p.add_argument("--batch-size-structured", type=int, default=4096, help="Rows per batch for structured redaction")
     p.add_argument("--batch-size-ner", type=int, default=256, help="Rows per batch for NER stage (smaller is safer)")
     p.add_argument("--actors-ner", type=int, default=32, help="Actor pool size for Presidio NER stage")
@@ -263,7 +272,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--supported-langs", default="en,zh", help="NER supported langs, comma-separated (default: en,zh)")
     p.add_argument("--spacy-en", default="en_core_web_sm", help="spaCy model for English")
     p.add_argument("--spacy-zh", default="zh_core_web_sm", help="spaCy model for Chinese")
-    p.add_argument("--ner-score-threshold", type=float, default=0.0, help="Presidio analyze score threshold (lower => more recall)")
+    p.add_argument(
+        "--ner-score-threshold", type=float, default=0.0, help="Presidio analyze score threshold (lower => more recall)"
+    )
     p.add_argument("--ray-address", default=None, help="Ray cluster address (auto/local)")
     return p.parse_args()
 

@@ -1,16 +1,19 @@
+import hashlib
+import itertools
+from typing import Any, Dict, List, Tuple
+
 import ray
 import ray.data as rd
-import itertools
-import hashlib
-from typing import List, Dict, Any, Tuple
 
 from llm_data_pipeline.dedup.minhash import char_ngrams, datasketch_minhash
+
 
 # ---------- LSH banding (Map) ----------
 def band_hash(vals: List[int]) -> str:
     # 稳定 hash：把 band 的 ints 打包成 bytes 再 sha1
     b = (",".join(map(str, vals))).encode("utf-8")
     return hashlib.sha1(b).hexdigest()
+
 
 def make_band_rows(row: Dict[str, Any], rows_per_band: int) -> List[Dict[str, Any]]:
     sig = row["signature"]
@@ -22,14 +25,17 @@ def make_band_rows(row: Dict[str, Any], rows_per_band: int) -> List[Dict[str, An
     for band_id in range(num_perm // rows_per_band):
         s = band_id * rows_per_band
         e = s + rows_per_band
-        out.append({
-            "band_id": band_id,
-            "band_hash": band_hash(sig[s:e]),
-            "doc_id": row["doc_id"],
-            "ts": ts,
-            "length": length,
-        })
+        out.append(
+            {
+                "band_id": band_id,
+                "band_hash": band_hash(sig[s:e]),
+                "doc_id": row["doc_id"],
+                "ts": ts,
+                "length": length,
+            }
+        )
     return out
+
 
 # ---------- bucket -> edges (Reduce) ----------
 def bucket_to_pairs(batch) -> List[Dict[str, Any]]:
@@ -54,6 +60,7 @@ def bucket_to_pairs(batch) -> List[Dict[str, Any]]:
         edges.append({"u": u, "v": v})
     return edges
 
+
 # ---------- union-find connected components ----------
 class UnionFind:
     def __init__(self):
@@ -70,10 +77,12 @@ class UnionFind:
         if ra != rb:
             self.parent[rb] = ra
 
+
 def pick_canonical(members: List[Tuple[str, int, int]]) -> str:
     # members: [(doc_id, ts, length), ...]
     members.sort(key=lambda x: (x[1], x[2], x[0]), reverse=True)
     return members[0][0]
+
 
 def ray_global_dedup(
     docs_ds: rd.Dataset,
@@ -83,11 +92,7 @@ def ray_global_dedup(
     band_rows = docs_ds.flat_map(lambda r: make_band_rows(r, rows_per_band))
 
     # Reduce: groupBy 桶 -> 产出候选边
-    edges_ds = (
-        band_rows
-        .groupby(["band_id", "band_hash"])
-        .map_groups(bucket_to_pairs, batch_format="pyarrow")
-    )
+    edges_ds = band_rows.groupby(["band_id", "band_hash"]).map_groups(bucket_to_pairs, batch_format="pyarrow")
 
     # 边去重（同一对可能在多个桶命中）
     edges_ds = edges_ds.groupby(["u", "v"]).count().drop_columns(["count()"])
@@ -97,7 +102,7 @@ def ray_global_dedup(
     total_edges = edges_ds.count()
 
     # --- CC（本地版本：把 edges 拉回 driver）---
-    edges = edges_ds.take_all()   # ⚠️ 边很大时不要这么做
+    edges = edges_ds.take_all()  # ⚠️ 边很大时不要这么做
     uf = UnionFind()
     for e in edges:
         uf.union(e["u"], e["v"])
@@ -131,9 +136,8 @@ def ray_global_dedup(
         "keep_set": keep,
     }
 
+
 if __name__ == "__main__":
-
-
     # 1. 准备测试数据
     docs = [
         {"doc_id": "doc1", "text": "今天天气不错，适合出去玩", "ts": 100},

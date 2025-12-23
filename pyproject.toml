@@ -19,6 +19,7 @@ dependencies = [
     "sentencepiece>=0.2.1",
     "spacy>=3.8.11",
     "tiktoken>=0.12.0",
+    "transformers>=4.57.3",
     "warcio>=1.7.5",
     "xxhash>=3.6.0",
 ]
@@ -32,6 +33,21 @@ build-backend = "uv_build"
 
 [dependency-groups]
 dev = [
+    "isort>=7.0.0",
+    "modelscope>=1.33.0",
+    "pyright>=1.1.407",
     "pytest>=9.0.2",
     "ruff>=0.14.9",
 ]
+
+[tool.ruff]
+line-length = 120
+target-version = "py313"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B"]
+# I = import sorting（等价 isort 的核心能力）
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"

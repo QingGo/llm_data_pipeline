@@ -1,6 +1,6 @@
-import re
 import hashlib
 import random
+import re
 from typing import Iterable, List, Sequence, Set, Tuple
 
 from datasketch import MinHash
@@ -31,9 +31,7 @@ def char_ngrams(text: str, n: int = 5) -> Set[bytes]:
 
 def hash64(data: bytes) -> int:
     # 64-bit stable hash
-    return int.from_bytes(
-        hashlib.blake2b(data, digest_size=8).digest(), "little", signed=False
-    )
+    return int.from_bytes(hashlib.blake2b(data, digest_size=8).digest(), "little", signed=False)
 
 
 # --------- 3) MinHash core ---------
@@ -52,9 +50,7 @@ def make_hash_params(k: int, seed: int = 42) -> List[Tuple[int, int]]:
     return params
 
 
-def minhash_signature(
-    shingles: Iterable[bytes], k: int = 128, seed: int = 42
-) -> List[int]:
+def minhash_signature(shingles: Iterable[bytes], k: int = 128, seed: int = 42) -> List[int]:
     params = make_hash_params(k, seed=seed)
     # 初始化为无穷大
     sig = [P] * k
@@ -103,8 +99,8 @@ if __name__ == "__main__":
 
     print("datasketch MinHash estimated Jaccard =", m1.jaccard(m2))
     print("signature length =", len(m1.hashvalues))
-    '''
+    """
     MinHash estimated Jaccard = 0.171875
     datasketch MinHash estimated Jaccard = 0.1484375
     signature length = 128
-    '''
+    """

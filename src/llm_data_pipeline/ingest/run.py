@@ -4,8 +4,8 @@
 """
 
 import argparse
+import os
 from pathlib import Path
-from typing import List
 
 import ray
 import ray.data as rd
@@ -13,7 +13,7 @@ import ray.data as rd
 from llm_data_pipeline.ingest.step import IngestConfig, extract_wet_gz_file
 
 
-def discover_files(data_dir: Path, pattern: str) -> List[Path]:
+def discover_files(data_dir: Path, pattern: str) -> list[Path]:
     """按模式枚举数据目录下的文件，过滤隐藏文件"""
     files = sorted(data_dir.glob(pattern))
     return list(filter(lambda p: not p.name.startswith("."), files))
@@ -38,13 +38,16 @@ def parse_args() -> argparse.Namespace:
 def main() -> None:
     """入口函数：初始化 Ray，构建数据集，派发解析并写出结果"""
     args = parse_args()
-    ray.init(address=args.ray_address or None)
+    venv_path = os.environ.get("VIRTUAL_ENV")
+    ray.init(
+        address=args.ray_address, object_store_memory=2 * 1024**3, runtime_env={"python": f"{venv_path}/bin/python"}
+    )
 
     data_dir = Path(args.data_dir)
     files = discover_files(data_dir, args.pattern)
     if args.max_files and args.max_files > 0:
         files = files[: args.max_files]
-    
+
     cfg = IngestConfig(
         min_text_chars=args.min_text_chars,
         max_text_chars=args.max_text_chars,
@@ -55,7 +58,7 @@ def main() -> None:
     # 直接把“路径列表”做成 dataset，再在 worker 上打开文件解析。
     ds_files = rd.from_items([{"path": str(p.absolute())} for p in files])
 
-    compute = rd.TaskPoolStrategy(size=args.taskpool_size) if args.taskpool_size else None
+    compute = rd.ActorPoolStrategy(size=args.taskpool_size) if args.taskpool_size else None
 
     ds_docs = ds_files.flat_map(
         lambda r: extract_wet_gz_file(Path(r["path"]), cfg),
@@ -64,7 +67,7 @@ def main() -> None:
     )
     output_path = Path(args.output)
     output_path.mkdir(parents=True, exist_ok=True)
-    ds_docs.write_parquet(output_path.absolute())
+    ds_docs.write_parquet(str(output_path.absolute()))
 
     print("files =", len(files))
     print("docs_count =", ds_docs.count())

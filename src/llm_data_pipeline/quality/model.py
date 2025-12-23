@@ -1,8 +1,9 @@
+from dataclasses import dataclass
+from typing import List, Optional
+
 import fasttext
 import fasttext.FastText
 import numpy as np
-from dataclasses import dataclass
-from typing import List, Optional
 
 
 # Monkey patch fasttext to fix numpy 2.0 compatibility
@@ -27,15 +28,14 @@ def _patched_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
     text = check(text)
     predictions = self.f.predict(text, k, threshold, on_unicode_error)  # [(prob, label), ...]
     if predictions:
-        probs, labels = zip(*predictions)   # unzip
+        probs, labels = zip(*predictions)  # unzip
     else:
         probs, labels = ([], ())
 
     return labels, np.asarray(probs, dtype=np.float32)
 
+
 fasttext.FastText._FastText.predict = _patched_predict
-
-
 
 
 @dataclass
@@ -68,7 +68,7 @@ class QualityFilter:
             return 0.0
 
         # 取全量 label 的分数，避免 k 设置不够导致取不到目标 label
-        labels, probs = self.model.predict(text, k=len(self.all_labels)+1)
+        labels, probs = self.model.predict(text, k=len(self.all_labels) + 1)
         m = dict(zip(labels, map(float, probs)))
         print("len=", len(text), "scores=", m)
         score_map: dict[str, float] = dict(zip(labels, probs))
@@ -93,7 +93,7 @@ if __name__ == "__main__":
     samples = [
         # --- 正例：高质量百科/学术文本 (预期保留) ---
         "ABOUT AWB KIDS ARE KIDS JOIN THE CAST << Back to AWB News Christine Rouse is honored on the “Today Show” The executive director of Acting Without Boundaries (AWB), Christine Rouse, was featured on the NBC Today Show with “Kathie Lee and Hoda” on March 1, 2012. The monthly segment, called “Everyone Has A Story,” features one ordinary person that has had a life-changing experience in their own life. Christine submitted an essay describing her life’s mission of increasing awareness of and support for people with disabilities. She described the process of creating the two non-profits she manages – “Kids are Kids,” which provides disability awareness workshops and AWB which provides theater arts opportunities for children, youth and young adults with physical disabilities . Christine talked about the importance of both in increasing inclusion for people, especially young people, with physical disabilities. The March “Everyone Has A Story” segment featured Christine, her mother, and her brother. Christine’s mother read a letter she wrote about Christine’s life and the pride she takes in her many accomplishments. John Tartaglia, a Broadway performer sang a song written for Christine – “Different is Beautiful”- by Kathie Lee Gifford and David Freidman. The song has a powerful message and will be performed by AWB actors in the near future. To cap off this exciting experience, the Today Show honored Christine’s work with $1000 donations to each of her organizations, Kids are Kids and AWB. 750 E. Haverford Road, Bryn Mawr, PA 19010 Email: mmurphy@awb2004.org",
-        '''<li><b>astro-ph.EP - Earth and Planetary Astrophysics</b> (<a href="/list/astro-ph.EP/new">new</a>, <a href="/list/astro-ph.EP/recent">recent</a>, <a href="/list/astro-ph.EP/current">current month</a>) <div class="description">Interplanetary medium, planetary physics, planetary astrobiology, extrasolar planets, comets, asteroids, meteorites. Structure and formation of the solar system</div> </li>''',
+        """<li><b>astro-ph.EP - Earth and Planetary Astrophysics</b> (<a href="/list/astro-ph.EP/new">new</a>, <a href="/list/astro-ph.EP/recent">recent</a>, <a href="/list/astro-ph.EP/current">current month</a>) <div class="description">Interplanetary medium, planetary physics, planetary astrobiology, extrasolar planets, comets, asteroids, meteorites. Structure and formation of the solar system</div> </li>""",
         "https://arxiv.org/abs/1706.03762 Abstract We propose the Transformer, a neural network architecture based solely on attention mechanisms, dispensing with recurrence and convolutions. We evaluate on machine translation benchmarks and analyze training cost, parallelization, and scaling behavior. References include BLEU, WMT, and attention ablations. © arXiv.org",
         "We study recurrent neural networks for sequence modeling and compare gated variants under a controlled experimental protocol. Across three benchmarks, the gated architectures converge faster and exhibit reduced gradient instability when the sequence length increases. Our implementation details and hyperparameters are reported to support reproducibility.",
         "This document specifies the behavior of a client and server during a handshake protocol that negotiates cryptographic parameters. Implementations MUST validate peer identities, enforce minimum key sizes, and reject deprecated ciphersuites. Security considerations discuss downgrade resilience and replay prevention.",
@@ -105,7 +105,6 @@ if __name__ == "__main__":
         "The device operates from 1.8 V to 3.3 V and supports a maximum clock frequency of 80 MHz under typical conditions. Power consumption scales approximately linearly with frequency, and thermal derating applies above 85°C ambient. Electrical characteristics are specified across process and temperature corners.",
         "We preprocess text by normalizing Unicode, removing boilerplate navigation elements, and segmenting into paragraphs before feature extraction. The classifier is trained with subword n-grams to improve robustness to rare tokens and spelling variants. Evaluation includes both in-domain and out-of-domain validation sets.",
         "This dataset contains annotated time-series recordings collected under an approved protocol, with consent and anonymization procedures described. Labels were assigned by two independent raters and adjudicated by a third in cases of disagreement. Versioning and checksum files are provided for integrity verification.",
-        
         # --- 反例：低质量广告/垃圾文本 (预期丢弃) ---
         "Buy cheap watches now!!! Click here!!! best price $9.99 for rolex replica.",
         "sex dating hot singles in your area! Sign up for free today. 100% free no credit card needed.",

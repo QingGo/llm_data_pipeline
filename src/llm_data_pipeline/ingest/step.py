@@ -15,6 +15,7 @@ from warcio.archiveiterator import ArchiveIterator
 @dataclass(frozen=True)
 class IngestConfig:
     """抽取管道的配置项"""
+
     min_text_chars: int = 200
     max_text_chars: int = 200_000
     max_docs_per_file: int = 200  # 0=不限（debug 时可设 200）

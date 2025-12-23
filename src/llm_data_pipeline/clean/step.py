@@ -11,6 +11,7 @@ from llm_data_pipeline.clean.rules import CleanRules, basic_clean, judge
 @dataclass(frozen=True)
 class CleanConfig:
     """清洗过程的配置项"""
+
     batch_size: int = 256
     rules: CleanRules = CleanRules()
 

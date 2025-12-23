@@ -38,17 +38,17 @@ class MinHashMapper:
         # 如果 text 为 None 或非字符串，需做容错
         if not isinstance(text, str):
             text = ""
-            
+
         # 1. 生成 shingles
         shingles = char_ngrams(text, n=self.ngram)
-        
+
         # 2. 计算 MinHash
         mh = datasketch_minhash(shingles, k=self.num_perm)
-        
+
         # 3. 保存签名 (转为 list 以便存储)
         # datasketch.MinHash.hashvalues 是 numpy array
         row["minhash_sig"] = mh.hashvalues.tolist()
-        
+
         return row
 
 
@@ -66,7 +66,7 @@ def main():
         return
 
     mapper = MinHashMapper(num_perm=args.num_perm, ngram=args.ngram)
-    
+
     # 使用 map 对每行数据计算签名
     ds_with_sig = ds.map(mapper)
 
@@ -75,7 +75,7 @@ def main():
 
     print(f"Writing to {out_dir}...")
     ds_with_sig.write_parquet(str(out_dir))
-    
+
     print("Done.")
 
 

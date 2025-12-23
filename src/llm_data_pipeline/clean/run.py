@@ -39,7 +39,7 @@ def main() -> None:
     ray.init(address=args.ray_address or None)
 
     input_path = Path(args.input)
-    ds = rd.read_parquet(input_path.absolute())
+    ds = rd.read_parquet(str(input_path.absolute()))
 
     rules = CleanRules(
         min_chars=args.min_chars,
@@ -63,8 +63,8 @@ def main() -> None:
     kept_dir.mkdir(parents=True, exist_ok=True)
     drop_dir.mkdir(parents=True, exist_ok=True)
 
-    kept_ds.write_parquet(kept_dir.absolute())
-    drop_ds.write_parquet(drop_dir.absolute())
+    kept_ds.write_parquet(str(kept_dir.absolute()))
+    drop_ds.write_parquet(str(drop_dir.absolute()))
 
     print("kept_count =", kept_ds.count())
     print("drop_count =", drop_ds.count())

@@ -2,7 +2,6 @@
 
 import re
 from dataclasses import dataclass
-from typing import Dict, Tuple
 
 _NON_WS_RE = re.compile(r"\S")
 _ALPHA_RE = re.compile(r"[A-Za-z]")
@@ -13,6 +12,7 @@ _PUNCT_RE = re.compile(r"[^\w\s\u4e00-\u9fff]", re.UNICODE)
 @dataclass(frozen=True)
 class CleanRules:
     """判定文本质量的阈值集合"""
+
     min_chars: int = 200
     max_chars: int = 200_000
     min_non_ws_ratio: float = 0.7
@@ -29,7 +29,7 @@ def basic_clean(text: str) -> str:
     return text
 
 
-def _ratios(text: str) -> Dict[str, float]:
+def _ratios(text: str) -> dict[str, float]:
     """计算非空白、字母+CJK、标点所占比例"""
     n = len(text)
     if n <= 0:
@@ -46,14 +46,14 @@ def _dup_line_ratio(text: str) -> float:
     lines = [ln.strip() for ln in text.split("\n") if ln.strip()]
     if len(lines) < 5:
         return 0.0
-    freq: Dict[str, int] = {}
+    freq: dict[str, int] = {}
     for ln in lines:
         freq[ln] = freq.get(ln, 0) + 1
     dup = sum(v for v in freq.values() if v > 1)
     return dup / max(1, len(lines))
 
 
-def judge(text: str, rules: CleanRules) -> Tuple[bool, str, Dict[str, float]]:
+def judge(text: str, rules: CleanRules) -> tuple[bool, str, dict[str, float]]:
     """应用规则判断文本是否保留，并返回原因与度量
 
     返回：
