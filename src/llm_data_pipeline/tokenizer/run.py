@@ -134,7 +134,7 @@ def write_parquet_shard(
         raise ValueError(f"Bad chunk array shape: {arr.shape}, expected (*, {seq_len})")
 
     flat = pa.array(arr.reshape(-1), type=pa.int32())
-    col = pa.FixedSizelistArray.from_arrays(flat, list_size=seq_len)  # pyright: ignore[reportAttributeAccessIssue]
+    col = pa.FixedSizeListArray.from_arrays(flat, list_size=seq_len)  # pyright: ignore[reportAttributeAccessIssue]
     table = pa.Table.from_arrays([col], names=["input_ids"])
     pq.write_table(table, out_path, compression=compression)
 

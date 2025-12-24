@@ -187,7 +187,7 @@ if __name__ == "__main__":
 
 
 """
-uv run python src/llm_data_pipeline/tokenizer/run.py \
+uv run python src/llm_data_pipeline/tokenizer/compare.py \
   --spm-model outputs/dev/tokenizers/spm32k/spm_32k.model \
   --input-dir outputs/dev/cleaned_parquet \
   --output-dir outputs/dev/token_parquet \
@@ -202,7 +202,7 @@ Tokenizing (num_proc=8): 107556 examples [01:14, 718.15 examples/s]
 [write] shards=140 time=11.46s bytes=949,550,178
 [done] metrics -> outputs/dev/token_parquet/metrics.json
 
-uv run python src/llm_data_pipeline/tokenizer/run.py \
+uv run python src/llm_data_pipeline/tokenizer/compare.py \
   --hf-tokenizer llama3_tokenizer \
   --input-dir outputs/dev/cleaned_parquet \
   --output-dir outputs/dev/token_parquet \
