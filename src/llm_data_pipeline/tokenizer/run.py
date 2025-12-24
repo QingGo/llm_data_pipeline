@@ -1,219 +1,279 @@
 import argparse
+import glob
 import json
 import os
-import time
-from pathlib import Path
+from collections.abc import Iterable, Iterator
 from typing import Any
 
-import datasets
+import numpy as np
+import pyarrow as pa
+import pyarrow.parquet as pq
+from datasets import load_dataset
 
-# 每个 worker 进程内各自 lazy-init（避免 tokenizer 对象跨进程 pickle）
-_HF_TOKENIZER = None
-_SPM = None
-
-
-def _get_hf_tokenizer(name_or_path: str):
-    global _HF_TOKENIZER
-    if _HF_TOKENIZER is None:
-        from transformers import AutoTokenizer
-
-        _HF_TOKENIZER = AutoTokenizer.from_pretrained(name_or_path, use_fast=True)
-        # 某些 tokenizer 没有 pad_token，会在某些调用路径里报错；这里兜底
-        if _HF_TOKENIZER.pad_token is None and _HF_TOKENIZER.eos_token is not None:
-            _HF_TOKENIZER.pad_token = _HF_TOKENIZER.eos_token
-    return _HF_TOKENIZER
+# -----------------------------
+# SentencePiece loader (per-process lazy init)
+# -----------------------------
+_SP = None
 
 
-def _get_spm(model_path: str):
-    global _SPM
-    if _SPM is None:
+def _get_sp(model_path: str):
+    global _SP
+    if _SP is None:
         import sentencepiece as spm
 
-        _SPM = spm.SentencePieceProcessor()
-        # 用稳定的 C++ 绑定 API（比 kwargs 构造更不容易被类型检查器误伤）
-        _SPM.Load(model_path)
-    return _SPM
+        sp = spm.SentencePieceProcessor()
+        ok = sp.Load(model_path)
+        if not ok:
+            raise RuntimeError(f"Failed to load sentencepiece model: {model_path}")
+        _SP = sp
+    return _SP
 
 
-def _tokenize_batch(
-    batch: dict[str, list[Any]],
-    *,
-    text_col: str,
-    hf_tokenizer: str | None,
-    spm_model: str | None,
-    add_special_tokens: bool,
-) -> dict[str, Any]:
-    texts = batch[text_col]
+def _resolve_eos_id(sp) -> int:
+    # sentencepiece usually has eos_id() for </s>
+    eos = sp.eos_id()
+    if eos is not None and eos >= 0:
+        return int(eos)
 
-    if hf_tokenizer:
-        tok = _get_hf_tokenizer(hf_tokenizer)
-        enc = tok(
-            texts,
-            add_special_tokens=add_special_tokens,
-            padding=False,
-            truncation=False,
-        )
-        input_ids = enc["input_ids"]
-    else:
-        sp = _get_spm(spm_model)  # type: ignore[arg-type]
-        input_ids = [sp.EncodeAsIds(t) for t in texts]
+    # fallback to common piece
+    for piece in ("</s>", "<eos>", "<EOS>"):
+        pid = sp.piece_to_id(piece)
+        if pid is not None and pid >= 0:
+            return int(pid)
 
-    num_tokens = [len(x) for x in input_ids]
-    return {"input_ids": input_ids, "num_tokens": num_tokens}
+    raise RuntimeError("Cannot resolve EOS id from the sentencepiece model. Your model seems to have no EOS piece.")
 
 
-def _sum_tokens_fast(ds: datasets.Dataset) -> int:
-    # 尽量用 Arrow 侧聚合，避免把整列拉回 Python
-    try:
-        import pyarrow.compute as pc
+# -----------------------------
+# ConstantLengthDataset (streaming packer)
+# -----------------------------
+class ConstantLengthDataset:
+    """
+    Streamingly packs tokenized samples into fixed-length chunks.
 
-        col = ds.data.column("num_tokens")
-        return int(pc.sum(col).as_py())  # pyright: ignore[reportAttributeAccessIssue]
-    except Exception:
-        return int(sum(ds["num_tokens"]))  # fallback
+    - Input: an iterable of token id lists (variable length)
+    - Output: dict {"input_ids": list[int]} of fixed length seq_len
+
+    Cross-block handling:
+    - carry-over buffer splits samples across chunk boundaries (no dropping remainder)
+    - optional EOS insertion per sample
+    """
+
+    def __init__(
+        self,
+        token_iter: Iterable[list[int]],
+        seq_len: int,
+        eos_id: int,
+        add_eos: bool = True,
+        ensure_eos: bool = True,
+        drop_remainder: bool = True,
+        buffer_flush_threshold: int = 1_000_000,
+    ) -> None:
+        self.token_iter = token_iter
+        self.seq_len = int(seq_len)
+        self.eos_id = int(eos_id)
+        self.add_eos = bool(add_eos)
+        self.ensure_eos = bool(ensure_eos)
+        self.drop_remainder = bool(drop_remainder)
+
+        # if buffer grows too big, we compact it (important for long streams)
+        self.buffer_flush_threshold = int(buffer_flush_threshold)
+
+    def __iter__(self) -> Iterator[dict[str, list[int]]]:
+        buf: list[int] = []
+        start = 0  # logical start index into buf (avoid O(n) pops)
+
+        for ids in self.token_iter:
+            if not ids:
+                continue
+
+            # Add/ensure EOS at sample boundary
+            if self.add_eos:
+                if self.ensure_eos:
+                    if ids[-1] != self.eos_id:
+                        ids = ids + [self.eos_id]
+                else:
+                    ids = ids + [self.eos_id]
+
+            buf.extend(ids)
+
+            # emit chunks as long as we have enough tokens
+            while (len(buf) - start) >= self.seq_len:
+                chunk = buf[start : start + self.seq_len]
+                start += self.seq_len
+                yield {"input_ids": chunk}
+
+            # periodically compact buffer to avoid unbounded growth
+            if start >= self.buffer_flush_threshold:
+                buf = buf[start:]
+                start = 0
+
+        # handle tail
+        remaining = len(buf) - start
+        if remaining > 0 and not self.drop_remainder:
+            # pad tail if you prefer; here we drop by default, but keep option
+            tail = buf[start:]
+            # If you want exactly seq_len always, you can pad with eos_id or 0
+            # Here we pad with eos_id (common) for completeness.
+            if len(tail) < self.seq_len:
+                tail = tail + [self.eos_id] * (self.seq_len - len(tail))
+            yield {"input_ids": tail}
 
 
+# -----------------------------
+# Parquet writer (fixed-size list[int32] column)
+# -----------------------------
+def write_parquet_shard(
+    out_path: str,
+    chunks: list[list[int]],
+    seq_len: int,
+    compression: str = "zstd",
+) -> None:
+    arr = np.asarray(chunks, dtype=np.int32)  # shape [n, L]
+    if arr.ndim != 2 or arr.shape[1] != seq_len:
+        raise ValueError(f"Bad chunk array shape: {arr.shape}, expected (*, {seq_len})")
+
+    flat = pa.array(arr.reshape(-1), type=pa.int32())
+    col = pa.FixedSizelistArray.from_arrays(flat, list_size=seq_len)  # pyright: ignore[reportAttributeAccessIssue]
+    table = pa.Table.from_arrays([col], names=["input_ids"])
+    pq.write_table(table, out_path, compression=compression)
+
+
+# -----------------------------
+# Pipeline
+# -----------------------------
 def main() -> None:
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--input-dir", default="outputs/dev/cleaned_parquet")
-    parser.add_argument("--output-dir", default="outputs/dev/token_parquet")
-    parser.add_argument("--text-col", default="text")
-    parser.add_argument("--num-proc", type=int, default=os.cpu_count() or 8)
-    parser.add_argument("--batch-size", type=int, default=2000)
-    parser.add_argument("--writer-batch-size", type=int, default=2000)
-    parser.add_argument("--num-shards", type=int, default=0, help="0 表示默认=输入 parquet 文件数（至少 1）")
-    parser.add_argument("--keep-text", action="store_true", help="默认会移除 text 列，只保留 input_ids/num_tokens")
-    parser.add_argument("--add-special-tokens", action="store_true")
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--spm_model", type=str, default="outputs/dev/tokenizers/spm32k/spm_32k.model")
+    ap.add_argument("--input_dir", type=str, default="outputs/dev/cleaned_parquet")
+    ap.add_argument("--output_dir", type=str, default="outputs/dev/token_packing_parquet")
 
-    g = parser.add_mutually_exclusive_group(required=True)
-    g.add_argument("--hf-tokenizer", default=None, help="例如本地 llama3 tokenizer 目录 或 HF 模型名")
-    g.add_argument("--spm-model", default=None, help="例如 outputs/dev/spm_32k.model")
+    ap.add_argument("--text_col", type=str, default="text")
+    ap.add_argument("--seq_len", type=int, default=4096)
+    ap.add_argument("--num_proc", type=int, default=max(1, os.cpu_count() // 2))  # pyright: ignore[reportOptionalOperand]
 
-    parser.add_argument("--compression", default="zstd", help="parquet 压缩：zstd/snappy/gzip/none")
-    args = parser.parse_args()
+    ap.add_argument("--batch_size", type=int, default=512, help="datasets.map batch size")
+    ap.add_argument("--writer_batch_size", type=int, default=4096, help="datasets.map writer_batch_size")
+    ap.add_argument("--shard_chunks", type=int, default=2048, help="packed chunks per output parquet shard")
 
-    in_dir = Path(args.input_dir)
-    out_dir = Path(args.output_dir)
-    out_dir.mkdir(parents=True, exist_ok=True)
+    ap.add_argument("--add_eos", action="store_true", default=True)
+    ap.add_argument("--no_add_eos", action="store_false", dest="add_eos")
+    ap.add_argument("--ensure_eos", action="store_true", default=True)
+    ap.add_argument("--no_ensure_eos", action="store_false", dest="ensure_eos")
 
-    files = sorted(in_dir.glob("*.parquet"))
-    if not files:
-        raise FileNotFoundError(f"No parquet files under: {in_dir}")
+    ap.add_argument("--drop_remainder", action="store_true", default=True)
+    ap.add_argument("--keep_remainder", action="store_false", dest="drop_remainder")
 
-    # 读取 parquet（datasets 支持 parquet loader）
-    data_files = [str(p) for p in files]
-    ds = datasets.load_dataset("parquet", data_files=data_files, split="train")
+    ap.add_argument("--compression", type=str, default="zstd", choices=["zstd", "snappy", "gzip", "brotli", "none"])
+    args = ap.parse_args()
 
+    os.makedirs(args.output_dir, exist_ok=True)
+
+    parquet_files = sorted(glob.glob(os.path.join(args.input_dir, "*.parquet")))
+    if not parquet_files:
+        raise FileNotFoundError(f"No parquet files found under: {args.input_dir}")
+
+    # 1) Load parquet dataset (HF datasets)
+    ds = load_dataset(
+        "parquet",
+        data_files=parquet_files,
+        split="train",
+    )
     if args.text_col not in ds.column_names:
-        raise ValueError(f"'{args.text_col}' column not found. columns={ds.column_names}")
+        raise KeyError(f"Column '{args.text_col}' not found. Available: {ds.column_names}")
 
-    remove_cols = None
-    if not args.keep_text:
-        remove_cols = [c for c in ds.column_names if c != args.text_col]
+    # 2) Tokenize with datasets.map(num_proc=N)
+    spm_model_path = args.spm_model
 
-    # 分词（CPU 多进程：num_proc）:contentReference[oaicite:1]{index=1}
-    t0 = time.perf_counter()
+    def tokenize_batch(batch: dict[str, list[Any]]) -> dict[str, Any]:
+        sp = _get_sp(spm_model_path)
+        texts = batch[args.text_col]
+        out_ids: list[list[int]] = []
+        out_len: list[int] = []
+        for t in texts:
+            if t is None:
+                out_ids.append([])
+                out_len.append(0)
+                continue
+            s = str(t)
+            if not s:
+                out_ids.append([])
+                out_len.append(0)
+                continue
+            ids = sp.encode(s, out_type=int)  # pyright: ignore[reportAttributeAccessIssue]
+            out_ids.append(ids)
+            out_len.append(len(ids))
+        return {"input_ids": out_ids, "length": out_len}
+
+    original_cols = ds.column_names
     ds_tok = ds.map(
-        lambda batch: _tokenize_batch(
-            batch,
-            text_col=args.text_col,
-            hf_tokenizer=args.hf_tokenizer,
-            spm_model=args.spm_model,
-            add_special_tokens=args.add_special_tokens,
-        ),
+        tokenize_batch,
         batched=True,
         batch_size=args.batch_size,
         num_proc=args.num_proc,
-        remove_columns=remove_cols,
+        remove_columns=original_cols,
         writer_batch_size=args.writer_batch_size,
-        load_from_cache_file=False,
-        desc="Tokenizing",
+        desc=f"Tokenizing with sentencepiece (num_proc={args.num_proc})",
     )
-    t1 = time.perf_counter()
 
-    total_tokens = _sum_tokens_fast(ds_tok)
-    map_sec = t1 - t0
-    tok_per_sec = total_tokens / map_sec if map_sec > 0 else 0.0
+    # Resolve eos_id once (in main process)
+    sp_main = _get_sp(spm_model_path)
+    eos_id = _resolve_eos_id(sp_main)
 
-    print(f"[tokenize] rows={ds_tok.num_rows:,}")
-    print(f"[tokenize] tokens={total_tokens:,}")
-    print(f"[tokenize] time={map_sec:.2f}s")
-    print(f"[tokenize] throughput={tok_per_sec:,.0f} tok/s  (~{tok_per_sec / 1e5:.2f}×10^5 tok/s)")
+    # 3) Stream pack: Concat -> Chunk to seq_len
+    # Use ds_tok["input_ids"] as a Python iterable of lists (memory-mapped Arrow; OK)
+    token_iter = (row for row in ds_tok["input_ids"])
 
-    # 写 parquet（datasets 支持导出 parquet）:contentReference[oaicite:2]{index=2}
-    num_shards = args.num_shards if args.num_shards > 0 else max(1, len(files))
+    packer = ConstantLengthDataset(
+        token_iter=token_iter,
+        seq_len=args.seq_len,
+        eos_id=eos_id,
+        add_eos=args.add_eos,
+        ensure_eos=args.ensure_eos,
+        drop_remainder=args.drop_remainder,
+    )
 
-    w0 = time.perf_counter()
-    total_bytes = 0
-    for i in range(num_shards):
-        shard = ds_tok.shard(num_shards=num_shards, index=i, contiguous=True)
-        out_path = out_dir / f"part-{i:05d}.parquet"
-        writer_kwargs = {}
-        if args.compression.lower() != "none":
-            writer_kwargs["compression"] = args.compression  # 例如 "zstd" / "snappy"
+    # 4) Save to disk as parquet shards
+    compression = None if args.compression == "none" else args.compression
 
-        written = shard.to_parquet(str(out_path), **writer_kwargs)
-        total_bytes += int(written)
-    w1 = time.perf_counter()
+    shard_idx = 0
+    chunks_buf: list[list[int]] = []
+    total_chunks = 0
 
-    write_sec = w1 - w0
-    print(f"[write] shards={num_shards} time={write_sec:.2f}s bytes={total_bytes:,}")
+    for item in packer:
+        chunks_buf.append(item["input_ids"])
+        if len(chunks_buf) >= args.shard_chunks:
+            out_path = os.path.join(args.output_dir, f"packed_{shard_idx:05d}.parquet")
+            write_parquet_shard(out_path, chunks_buf, seq_len=args.seq_len, compression=(compression or "none"))
+            total_chunks += len(chunks_buf)
+            chunks_buf.clear()
+            shard_idx += 1
 
-    metrics = {
-        "input_dir": str(in_dir),
-        "output_dir": str(out_dir),
-        "num_input_files": len(files),
-        "rows": ds_tok.num_rows,
-        "tokens": total_tokens,
+    if chunks_buf:
+        out_path = os.path.join(args.output_dir, f"packed_{shard_idx:05d}.parquet")
+        write_parquet_shard(out_path, chunks_buf, seq_len=args.seq_len, compression=(compression or "none"))
+        total_chunks += len(chunks_buf)
+        chunks_buf.clear()
+
+    meta = {
+        "seq_len": args.seq_len,
+        "eos_id": eos_id,
+        "spm_model": os.path.abspath(spm_model_path),
+        "input_dir": os.path.abspath(args.input_dir),
+        "output_dir": os.path.abspath(args.output_dir),
         "num_proc": args.num_proc,
-        "batch_size": args.batch_size,
-        "writer_batch_size": args.writer_batch_size,
-        "tokenizer": {
-            "hf_tokenizer": args.hf_tokenizer,
-            "spm_model": args.spm_model,
-            "add_special_tokens": args.add_special_tokens,
-        },
-        "time_sec": {"tokenize_map": map_sec, "write_parquet": write_sec},
-        "throughput_tok_per_sec": tok_per_sec,
-        "parquet": {"compression": args.compression, "num_shards": num_shards, "bytes_written": total_bytes},
+        "drop_remainder": args.drop_remainder,
+        "add_eos": args.add_eos,
+        "ensure_eos": args.ensure_eos,
+        "total_chunks": total_chunks,
+        "total_tokens_out": int(total_chunks) * int(args.seq_len),
     }
-    (out_dir / "metrics.json").write_text(json.dumps(metrics, ensure_ascii=False, indent=2), encoding="utf-8")
-    print(f"[done] metrics -> {out_dir / 'metrics.json'}")
+    with open(os.path.join(args.output_dir, "packing_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    print(f"[OK] Wrote {total_chunks} packed chunks to: {args.output_dir}")
+    print(f"[Meta] {os.path.join(args.output_dir, 'packing_meta.json')}")
 
 
 if __name__ == "__main__":
-    # 重要：多进程下建议总是加 main guard（macOS/Windows 默认 spawn）
     main()
-
-
-"""
-uv run python src/llm_data_pipeline/tokenizer/run.py \
-  --spm-model outputs/dev/tokenizers/spm32k/spm_32k.model \
-  --input-dir outputs/dev/cleaned_parquet \
-  --output-dir outputs/dev/token_parquet \
-  --num-proc 8 \
-  --batch-size 2000
-
-Tokenizing (num_proc=8): 107556 examples [01:14, 718.15 examples/s]                                
-[tokenize] rows=53,778
-[tokenize] tokens=125,510,712
-[tokenize] time=74.94s
-[tokenize] throughput=1,674,775 tok/s  (~16.75×10^5 tok/s)
-[write] shards=140 time=11.46s bytes=949,550,178
-[done] metrics -> outputs/dev/token_parquet/metrics.json
-
-uv run python src/llm_data_pipeline/tokenizer/run.py \
-  --hf-tokenizer llama3_tokenizer \
-  --input-dir outputs/dev/cleaned_parquet \
-  --output-dir outputs/dev/token_parquet \
-  --num-proc 8 \
-  --batch-size 2000
-
-Tokenizing (num_proc=8): 100%|███████████████████████| 53778/53778 [02:00<00:00, 444.48 examples/s]
-[tokenize] rows=53,778
-[tokenize] tokens=129,409,748
-[tokenize] time=121.06s
-[tokenize] throughput=1,068,954 tok/s  (~10.69×10^5 tok/s)
-[write] shards=140 time=17.25s bytes=965,146,322
-[done] metrics -> outputs/dev/token_parquet/metrics.json
-"""
