@@ -45,6 +45,42 @@ def _resolve_eos_id(sp) -> int:
 
 
 # -----------------------------
+# Helpers for independent-sample packing metadata
+# -----------------------------
+def _runs_from_sids(chunk_sids: list[int]) -> tuple[list[int], list[int], list[int]]:
+    """
+    Convert per-token global sample ids into:
+      - seq_id: per-token local segment id (0..k-1) for block-diagonal masking
+      - seq_lens: run lengths
+      - offsets: cumulative start offsets (len = k+1, last is L)
+    Assumes chunk_sids length = L.
+    """
+    L = len(chunk_sids)
+    if L == 0:
+        return [], [], [0]
+    seq_id: list[int] = [0] * L
+    seq_lens: list[int] = []
+    offsets: list[int] = [0]
+
+    cur = chunk_sids[0]
+    seg = 0
+    run = 0
+    for i in range(L):
+        sid = chunk_sids[i]
+        if sid != cur:
+            seq_lens.append(run)
+            offsets.append(i)
+            seg += 1
+            cur = sid
+            run = 0
+        seq_id[i] = seg
+        run += 1
+    seq_lens.append(run)
+    offsets.append(L)
+    return seq_id, seq_lens, offsets
+
+
+# -----------------------------
 # ConstantLengthDataset (streaming packer)
 # -----------------------------
 class ConstantLengthDataset:
@@ -68,6 +104,8 @@ class ConstantLengthDataset:
         ensure_eos: bool = True,
         drop_remainder: bool = True,
         buffer_flush_threshold: int = 1_000_000,
+        emit_seq_id: bool = False,
+        emit_seq_lens_offsets: bool = False,
     ) -> None:
         self.token_iter = token_iter
         self.seq_len = int(seq_len)
@@ -79,10 +117,16 @@ class ConstantLengthDataset:
         # if buffer grows too big, we compact it (important for long streams)
         self.buffer_flush_threshold = int(buffer_flush_threshold)
 
+        self.emit_seq_id = bool(emit_seq_id)
+        self.emit_seq_lens_offsets = bool(emit_seq_lens_offsets)
+        self._need_sids = self.emit_seq_id or self.emit_seq_lens_offsets
+
     def __iter__(self) -> Iterator[dict[str, list[int]]]:
         buf: list[int] = []
+        sid_buf: list[int] | None = [] if self._need_sids else None
         start = 0  # logical start index into buf (avoid O(n) pops)
 
+        sample_ctr = 0  # global sample counter (used only to label tokens)
         for ids in self.token_iter:
             if not ids:
                 continue
@@ -96,16 +140,31 @@ class ConstantLengthDataset:
                     ids = ids + [self.eos_id]
 
             buf.extend(ids)
+            if sid_buf is not None:
+                sid_buf.extend([sample_ctr] * len(ids))
+            sample_ctr += 1
 
             # emit chunks as long as we have enough tokens
             while (len(buf) - start) >= self.seq_len:
                 chunk = buf[start : start + self.seq_len]
+                out: dict[str, Any] = {"input_ids": chunk}
+                if sid_buf is not None:
+                    chunk_sids = sid_buf[start : start + self.seq_len]
+                    if self.emit_seq_id or self.emit_seq_lens_offsets:
+                        seq_id_local, seq_lens, offsets = _runs_from_sids(chunk_sids)
+                        if self.emit_seq_id:
+                            out["seq_id"] = seq_id_local
+                        if self.emit_seq_lens_offsets:
+                            out["seq_lens"] = seq_lens
+                            out["offsets"] = offsets
                 start += self.seq_len
-                yield {"input_ids": chunk}
+                yield out
 
             # periodically compact buffer to avoid unbounded growth
             if start >= self.buffer_flush_threshold:
                 buf = buf[start:]
+                if sid_buf is not None:
+                    sid_buf = sid_buf[start:]
                 start = 0
 
         # handle tail
@@ -117,7 +176,19 @@ class ConstantLengthDataset:
             # Here we pad with eos_id (common) for completeness.
             if len(tail) < self.seq_len:
                 tail = tail + [self.eos_id] * (self.seq_len - len(tail))
-            yield {"input_ids": tail}
+            out2: dict[str, Any] = {"input_ids": tail}
+            if sid_buf is not None:
+                tail_sids = sid_buf[start:]
+                if len(tail_sids) < self.seq_len:
+                    # pad tail sids with a new id to avoid merging with last segment
+                    tail_sids = tail_sids + [sample_ctr] * (self.seq_len - len(tail_sids))
+                seq_id_local, seq_lens, offsets = _runs_from_sids(tail_sids[: self.seq_len])
+                if self.emit_seq_id:
+                    out2["seq_id"] = seq_id_local
+                if self.emit_seq_lens_offsets:
+                    out2["seq_lens"] = seq_lens
+                    out2["offsets"] = offsets
+            yield out2
 
 
 # -----------------------------
@@ -125,17 +196,41 @@ class ConstantLengthDataset:
 # -----------------------------
 def write_parquet_shard(
     out_path: str,
-    chunks: list[list[int]],
+    rows: list[dict[str, Any]],
     seq_len: int,
     compression: str = "zstd",
 ) -> None:
-    arr = np.asarray(chunks, dtype=np.int32)  # shape [n, L]
+    input_chunks = [r["input_ids"] for r in rows]
+    arr = np.asarray(input_chunks, dtype=np.int32)  # shape [n, L]
     if arr.ndim != 2 or arr.shape[1] != seq_len:
         raise ValueError(f"Bad chunk array shape: {arr.shape}, expected (*, {seq_len})")
 
     flat = pa.array(arr.reshape(-1), type=pa.int32())
-    col = pa.FixedSizeListArray.from_arrays(flat, list_size=seq_len)  # pyright: ignore[reportAttributeAccessIssue]
-    table = pa.Table.from_arrays([col], names=["input_ids"])
+    cols = []
+    names = []
+    col_input = pa.FixedSizeListArray.from_arrays(flat, list_size=seq_len)
+    cols.append(col_input)
+    names.append("input_ids")
+
+    if "seq_id" in rows[0]:
+        seq_chunks = [r["seq_id"] for r in rows]
+        sarr = np.asarray(seq_chunks, dtype=np.int32)
+        if sarr.ndim != 2 or sarr.shape[1] != seq_len:
+            raise ValueError(f"Bad seq_id array shape: {sarr.shape}, expected (*, {seq_len})")
+        sflat = pa.array(sarr.reshape(-1), type=pa.int32())
+        col_seq = pa.FixedSizeListArray.from_arrays(sflat, list_size=seq_len)
+        cols.append(col_seq)
+        names.append("seq_id")
+
+    if "seq_lens" in rows[0]:
+        lens = [r["seq_lens"] for r in rows]
+        offs = [r["offsets"] for r in rows]
+        cols.append(pa.array(lens, type=pa.list_(pa.int32())))
+        names.append("seq_lens")
+        cols.append(pa.array(offs, type=pa.list_(pa.int32())))
+        names.append("offsets")
+
+    table = pa.Table.from_arrays(cols, names=names)
     pq.write_table(table, out_path, compression=compression)
 
 
@@ -163,6 +258,20 @@ def main() -> None:
 
     ap.add_argument("--drop_remainder", action="store_true", default=True)
     ap.add_argument("--keep_remainder", action="store_false", dest="drop_remainder")
+
+    # Independent-sample packing metadata (for block-diagonal attention)
+    ap.add_argument(
+        "--emit_seq_id",
+        action="store_true",
+        default=False,
+        help="Emit per-token local seq_id (FixedSizeList[int32, L]) for block-diagonal masking",
+    )
+    ap.add_argument(
+        "--emit_seq_lens_offsets",
+        action="store_true",
+        default=False,
+        help="Emit seq_lens and offsets (List[int32]) per chunk for varlen/block-diagonal masking",
+    )
 
     ap.add_argument("--compression", type=str, default="zstd", choices=["zstd", "snappy", "gzip", "brotli", "none"])
     args = ap.parse_args()
@@ -231,29 +340,31 @@ def main() -> None:
         add_eos=args.add_eos,
         ensure_eos=args.ensure_eos,
         drop_remainder=args.drop_remainder,
+        emit_seq_id=args.emit_seq_id,
+        emit_seq_lens_offsets=args.emit_seq_lens_offsets,
     )
 
     # 4) Save to disk as parquet shards
     compression = None if args.compression == "none" else args.compression
 
     shard_idx = 0
-    chunks_buf: list[list[int]] = []
+    rows_buf: list[dict[str, Any]] = []
     total_chunks = 0
 
     for item in packer:
-        chunks_buf.append(item["input_ids"])
-        if len(chunks_buf) >= args.shard_chunks:
+        rows_buf.append(item)
+        if len(rows_buf) >= args.shard_chunks:
             out_path = os.path.join(args.output_dir, f"packed_{shard_idx:05d}.parquet")
-            write_parquet_shard(out_path, chunks_buf, seq_len=args.seq_len, compression=(compression or "none"))
-            total_chunks += len(chunks_buf)
-            chunks_buf.clear()
+            write_parquet_shard(out_path, rows_buf, seq_len=args.seq_len, compression=(compression or "none"))
+            total_chunks += len(rows_buf)
+            rows_buf.clear()
             shard_idx += 1
 
-    if chunks_buf:
+    if rows_buf:
         out_path = os.path.join(args.output_dir, f"packed_{shard_idx:05d}.parquet")
-        write_parquet_shard(out_path, chunks_buf, seq_len=args.seq_len, compression=(compression or "none"))
-        total_chunks += len(chunks_buf)
-        chunks_buf.clear()
+        write_parquet_shard(out_path, rows_buf, seq_len=args.seq_len, compression=(compression or "none"))
+        total_chunks += len(rows_buf)
+        rows_buf.clear()
 
     meta = {
         "seq_len": args.seq_len,
@@ -265,6 +376,8 @@ def main() -> None:
         "drop_remainder": args.drop_remainder,
         "add_eos": args.add_eos,
         "ensure_eos": args.ensure_eos,
+        "emit_seq_id": args.emit_seq_id,
+        "emit_seq_lens_offsets": args.emit_seq_lens_offsets,
         "total_chunks": total_chunks,
         "total_tokens_out": int(total_chunks) * int(args.seq_len),
     }
@@ -277,3 +390,17 @@ def main() -> None:
 
 if __name__ == "__main__":
     main()
+
+"""
+uv run src/llm_data_pipeline/tokenizer/run.py \
+  --spm_model outputs/dev/tokenizers/spm32k/spm_32k.model \
+  --input_dir outputs/dev/cleaned_parquet \
+  --output_dir outputs/dev/token_packing_parquet \
+  --text_col text \
+  --seq_len 4096 \
+  --num_proc 8 \
+  --shard_chunks 2048 \
+  --compression zstd \
+  --emit_seq_id \
+  --emit_seq_lens_offsets
+"""
