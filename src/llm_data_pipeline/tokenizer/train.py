@@ -12,6 +12,7 @@ def write_shards_with_ray(
     out_dir: Path,
     num_shards: int,
     max_chars: int,
+    limit: int = 0,
 ) -> list[str]:
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -22,6 +23,10 @@ def write_shards_with_ray(
         raise ValueError(f"'text' column not found. columns={schema.names}")
 
     ds = ds.select_columns(["text"]).filter(lambda r: r["text"] is not None and str(r["text"]).strip() != "")
+
+    if limit > 0:
+        print(f"DEBUG: Limiting tokenizer training input to {limit} records.")
+        ds = ds.limit(limit)
 
     if max_chars > 0:
         ds = ds.map(lambda r: {"text": str(r["text"])[:max_chars]})
@@ -156,6 +161,7 @@ def run_train_tokenizer(args) -> dict:
         out_dir=shard_dir,
         num_shards=num_shards,
         max_chars=max_chars,
+        limit=getattr(args, "limit", 0),
     )
     print(f"  wrote {len(txt_paths)} shard files into {shard_dir}")
 

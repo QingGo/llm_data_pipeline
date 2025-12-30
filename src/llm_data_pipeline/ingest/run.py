@@ -55,6 +55,11 @@ def run_ingest(args) -> dict:
     if max_files and max_files > 0:
         files = files[:max_files]
 
+    limit = getattr(args, "limit", 0)
+    if limit > 0 and limit < len(files):
+        print(f"DEBUG: Pruning file list to {limit} files due to record limit.")
+        files = files[:limit]
+
     cfg = IngestConfig(
         min_text_chars=getattr(args, "min_text_chars", 200),
         max_text_chars=getattr(args, "max_text_chars", 200_000),
@@ -71,6 +76,11 @@ def run_ingest(args) -> dict:
         compute=compute,
         num_cpus=num_cpus,
     )
+
+    limit = getattr(args, "limit", 0)
+    if limit > 0:
+        print(f"DEBUG: Limiting ingest to {limit} records.")
+        ds_docs = ds_docs.limit(limit)
 
     output_path.mkdir(parents=True, exist_ok=True)
     print(f"Writing ingest result to {output_path}...")

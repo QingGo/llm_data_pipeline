@@ -29,6 +29,11 @@ def run_clustering(args) -> dict:
     print(f"Reading from {input_path}...")
     ds = rd.read_parquet(str(input_path.absolute()))
 
+    limit = getattr(args, "limit", 0)
+    if limit > 0:
+        print(f"DEBUG: Limiting clustering input to {limit} records.")
+        ds = ds.limit(limit)
+
     # Rename 'minhash_sig' to 'signature' if needed
     # The previous code had a map just for this.
     # Our minhash_step produces "minhash_sig".

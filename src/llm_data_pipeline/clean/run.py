@@ -46,6 +46,11 @@ def run_clean(args) -> dict:
 
     ds = rd.read_parquet(str(input_path.absolute()))
 
+    limit = getattr(args, "limit", 0)
+    if limit > 0:
+        print(f"DEBUG: Limiting clean input to {limit} records.")
+        ds = ds.limit(limit)
+
     rules = CleanRules(
         min_chars=getattr(args, "min_chars", 200),
         max_chars=getattr(args, "max_chars", 200_000),

@@ -313,6 +313,11 @@ def run_tokenize(args) -> dict:
     if text_col not in ds.column_names:
         raise KeyError(f"Column '{text_col}' not found. Available: {ds.column_names}")
 
+    limit = getattr(args, "limit", 0)
+    if limit > 0 and len(ds) > limit:
+        print(f"DEBUG: Limiting tokenization input to {limit} records.")
+        ds = ds.select(range(limit))
+
     # 2) Tokenize with datasets.map(num_proc=N)
     spm_model_path = spm_model
     if not os.path.exists(spm_model_path):

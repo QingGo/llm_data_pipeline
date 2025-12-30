@@ -1,6 +1,6 @@
 import hashlib
 import itertools
-from typing import Any, Dict, List, Tuple
+from typing import Any
 
 import ray
 import ray.data as rd
@@ -9,13 +9,13 @@ from llm_data_pipeline.dedup.minhash import char_ngrams, datasketch_minhash
 
 
 # ---------- LSH banding (Map) ----------
-def band_hash(vals: List[int]) -> str:
+def band_hash(vals: list[int]) -> str:
     # 稳定 hash：把 band 的 ints 打包成 bytes 再 sha1
     b = (",".join(map(str, vals))).encode("utf-8")
     return hashlib.sha1(b).hexdigest()
 
 
-def make_band_rows(row: Dict[str, Any], rows_per_band: int) -> List[Dict[str, Any]]:
+def make_band_rows(row: dict[str, Any], rows_per_band: int) -> list[dict[str, Any]]:
     sig = row["signature"]
     num_perm = len(sig)
     assert num_perm % rows_per_band == 0
@@ -38,10 +38,10 @@ def make_band_rows(row: Dict[str, Any], rows_per_band: int) -> List[Dict[str, An
 
 
 # ---------- bucket -> edges (Reduce) ----------
-def bucket_to_pairs(batch) -> List[Dict[str, Any]]:
+def bucket_to_pairs(batch) -> dict[str, list[dict[str, Any]]]:
     """
     batch: 一个桶内的记录（同 band_id, band_hash）
-    输出：该桶内所有 doc_id 两两组合的边
+    输出：该桶内所有 doc_id 两两组合的边，包装在字典中
     """
     # batch 是 pyarrow table / pandas df 都行，这里用最通用的转 dict
     docs = []
@@ -49,7 +49,7 @@ def bucket_to_pairs(batch) -> List[Dict[str, Any]]:
         docs.append((r["doc_id"], r["ts"], r["length"]))
 
     if len(docs) < 2:
-        return []
+        return {"edges": []}
 
     # 可选：桶太大直接降级，避免 O(n^2) 炸裂
     # docs = docs[:500]
@@ -58,7 +58,7 @@ def bucket_to_pairs(batch) -> List[Dict[str, Any]]:
     for (a, _, _), (b, _, _) in itertools.combinations(docs, 2):
         u, v = (a, b) if a < b else (b, a)
         edges.append({"u": u, "v": v})
-    return edges
+    return {"edges": edges}
 
 
 # ---------- union-find connected components ----------
@@ -78,7 +78,7 @@ class UnionFind:
             self.parent[rb] = ra
 
 
-def pick_canonical(members: List[Tuple[str, int, int]]) -> str:
+def pick_canonical(members: list[tuple[str, int, int]]) -> str:
     # members: [(doc_id, ts, length), ...]
     members.sort(key=lambda x: (x[1], x[2], x[0]), reverse=True)
     return members[0][0]
@@ -92,7 +92,12 @@ def ray_global_dedup(
     band_rows = docs_ds.flat_map(lambda r: make_band_rows(r, rows_per_band))
 
     # Reduce: groupBy 桶 -> 产出候选边
-    edges_ds = band_rows.groupby(["band_id", "band_hash"]).map_groups(bucket_to_pairs, batch_format="pyarrow")
+    # bucket_to_pairs returns {"edges": [...]}, we need to unwrap it
+    edges_ds = (
+        band_rows.groupby(["band_id", "band_hash"])
+        .map_groups(bucket_to_pairs, batch_format="pyarrow")
+        .flat_map(lambda row: row["edges"])
+    )
 
     # 边去重（同一对可能在多个桶命中）
     edges_ds = edges_ds.groupby(["u", "v"]).count().drop_columns(["count()"])
@@ -109,7 +114,7 @@ def ray_global_dedup(
 
     # 每个 doc -> root
     docs_meta = docs_ds.select_columns(["doc_id", "ts", "length"]).take_all()
-    comp: Dict[str, List[Tuple[str, int, int]]] = {}
+    comp: dict[str, list[tuple[str, int, int]]] = {}
     for r in docs_meta:
         doc_id = r["doc_id"]
         ts = r.get("ts", 0)

@@ -1,7 +1,7 @@
 import hashlib
 import random
 import re
-from typing import Iterable, List, Sequence, Set, Tuple
+from collections.abc import Iterable, Sequence
 
 from datasketch import MinHash
 
@@ -15,7 +15,7 @@ def normalize_text(text: str) -> str:
     return text
 
 
-def char_ngrams(text: str, n: int = 5) -> Set[bytes]:
+def char_ngrams(text: str, n: int = 5) -> set[bytes]:
     """
     中文/混合文本常用 char n-gram。
     返回 bytes，便于后续哈希与 datasketch.update 对齐。
@@ -40,7 +40,7 @@ def hash64(data: bytes) -> int:
 P = (1 << 61) - 1
 
 
-def make_hash_params(k: int, seed: int = 42) -> List[Tuple[int, int]]:
+def make_hash_params(k: int, seed: int = 42) -> list[tuple[int, int]]:
     rng = random.Random(seed)
     params = []
     for _ in range(k):
@@ -50,7 +50,7 @@ def make_hash_params(k: int, seed: int = 42) -> List[Tuple[int, int]]:
     return params
 
 
-def minhash_signature(shingles: Iterable[bytes], k: int = 128, seed: int = 42) -> List[int]:
+def minhash_signature(shingles: Iterable[bytes], k: int = 128, seed: int = 42) -> list[int]:
     params = make_hash_params(k, seed=seed)
     # 初始化为无穷大
     sig = [P] * k
@@ -78,29 +78,79 @@ def datasketch_minhash(shingles: Iterable[bytes], k: int = 128) -> MinHash:
     return m
 
 
+# --------- 4) Vectorized MinHash (NumPy) ---------
+
+import numpy as np
+
+
+class VectorizedMinHash:
+    def __init__(self, k: int = 128, seed: int = 42):
+        self.k = k
+        self.seed = seed
+        # Using native uint64 arithmetic (modulo 2**64)
+        self._init_perms()
+
+    def _init_perms(self):
+        rng = np.random.RandomState(self.seed)
+        # Generate k pairs of (a, b) over full uint64 range
+        # We perform everything in uint64.
+        # a should be odd to ensure it's coprime with 2^64 (which is power of 2)
+        # numpy's randint with dtype=uint64 and large bounds can be tricky with legacy RandomState.
+        # A simple way to get full 64-bit entropy:
+        self.a = rng.randint(1, 2**62, size=self.k, dtype=np.uint64) * 4 + 1  # Ensure odd and spread
+        # Actually proper way:
+        # self.a = rng.bytes(self.k * 8) ...
+        # But randint(1, 2**64...) might fail on some numpy versions.
+        # Let's stick to safe large range that fits in int64 for generation, key is type is uint64 for calc.
+        # Or just use two 32-bit generations combined.
+        # For simplicity and speed let's just use high range available to randint.
+
+        # Using 2**63-1 is safe for signed int64 inputs to randint, then cast to uint64
+        a_base = rng.randint(1, 2**63 - 1, size=self.k, dtype=np.int64).astype(np.uint64)
+        self.a = a_base | np.uint64(1)  # Ensure odd
+
+        self.b = rng.randint(0, 2**63 - 1, size=self.k, dtype=np.int64).astype(np.uint64)
+
+    def compute_signature(self, text: str) -> list[int]:
+        shingles_set = char_ngrams(text, n=5)
+        if not shingles_set:
+            # Empty text case
+            return [np.uint64(0)] * self.k
+
+        # 1. Provide stable hash for each shingle
+        # map bytes -> u64
+        hashes = [hash64(s) for s in shingles_set]
+
+        # Convert to numpy array (N,)
+        H = np.array(hashes, dtype=np.uint64)
+
+        # 2. Vectorized Permutation
+        # H shape: (N,)
+        # a, b shape: (K,)
+        # Broadcast: (N, 1) * (K,) + (K,) -> (N, K)
+        # Native uint64 arithmetic wraps around 2^64 (modulo 2^64)
+
+        # M = (H * a + b)
+        # We need reshaping for broadcast
+
+        # (N, 1) * (K,) -> (N, K)
+        M = H.reshape(-1, 1) * self.a + self.b
+
+        # 3. Min over columns (axis=0) -> (K,)
+        sigs = M.min(axis=0)
+
+        return sigs.tolist()
+
+
 if __name__ == "__main__":
     t1 = "今天讲 MinHash 和 LSH，用来做模糊去重。"
     t2 = "今天聊 MinHash/LSH，用于做近重复去重。"
 
-    shingles1 = char_ngrams(t1, n=5)
-    shingles2 = char_ngrams(t2, n=5)
-
-    sig1 = minhash_signature(shingles1, k=128, seed=42)
-    sig2 = minhash_signature(shingles2, k=128, seed=42)
-
-    est = minhash_jaccard_estimate(sig1, sig2)
-    print("MinHash estimated Jaccard =", est)
+    # Check consistency
+    vm = VectorizedMinHash(k=128, seed=42)
+    sig1_v = vm.compute_signature(t1)
 
     shingles1 = char_ngrams(t1, n=5)
-    shingles2 = char_ngrams(t2, n=5)
+    sig1_legacy = minhash_signature(shingles1, k=128, seed=42)
 
-    m1 = datasketch_minhash(shingles1, k=128)
-    m2 = datasketch_minhash(shingles2, k=128)
-
-    print("datasketch MinHash estimated Jaccard =", m1.jaccard(m2))
-    print("signature length =", len(m1.hashvalues))
-    """
-    MinHash estimated Jaccard = 0.171875
-    datasketch MinHash estimated Jaccard = 0.1484375
-    signature length = 128
-    """
+    print(f"Vectorized matches Legacy? {sig1_v == sig1_legacy}")

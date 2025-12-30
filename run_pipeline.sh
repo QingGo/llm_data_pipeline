@@ -15,5 +15,6 @@ echo "Logs will be written to outputs/dev/pipeline.log"
 # Example usage:
 # ./run_pipeline.sh --steps all
 # ./run_pipeline.sh --steps ingest,clean --max-files 2
+# ./run_pipeline.sh--steps ingest,clean,minhash --limit 1000 --output-base outputs/quick_test
 uv run src/llm_data_pipeline/pipeline.py "$@"
 

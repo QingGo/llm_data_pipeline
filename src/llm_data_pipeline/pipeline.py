@@ -13,8 +13,12 @@ import ray
 
 
 def setup_logging(output_dir: Path):
-    output_dir.mkdir(parents=True, exist_ok=True)
-    log_file = output_dir / "pipeline.log"
+    # Create global logs dir
+    logs_dir = Path("logs")
+    logs_dir.mkdir(parents=True, exist_ok=True)
+
+    timestamp = time.strftime("%Y%m%d_%H%M%S")
+    log_file = logs_dir / f"pipeline_{timestamp}.log"
 
     # Remove existing handlers
     root = logging.getLogger()
@@ -22,12 +26,31 @@ def setup_logging(output_dir: Path):
         for handler in root.handlers:
             root.removeHandler(handler)
 
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-        handlers=[logging.FileHandler(log_file), logging.StreamHandler(sys.stdout)],
-    )
-    return logging.getLogger("Pipeline")
+    class TerminalFormatter(logging.Formatter):
+        """Minimal formatter for terminal output"""
+
+        def format(self, record):
+            return f"[{record.levelname}] {record.getMessage()}"
+
+    file_formatter = logging.Formatter("%(asctime)s [%(levelname)s] %(name)s: %(message)s")
+
+    file_handler = logging.FileHandler(log_file)
+    file_handler.setFormatter(file_formatter)
+
+    stream_handler = logging.StreamHandler(sys.stdout)
+    stream_handler.setFormatter(TerminalFormatter())
+
+    # Basic config sets up Root logger
+    logging.basicConfig(level=logging.INFO, handlers=[file_handler])
+
+    # Configure Pipeline logger to also print to console
+    pipeline_logger = logging.getLogger("Pipeline")
+    pipeline_logger.setLevel(logging.INFO)
+    pipeline_logger.addHandler(stream_handler)
+    pipeline_logger.propagate = True  # Propagate to Root (File)
+
+    pipeline_logger.info(f"Logging to {log_file}")
+    return pipeline_logger
 
 
 def run_step(step_name: str, func, args, logger):
@@ -58,6 +81,9 @@ def main():
 
     # We will pass a config object to steps, populated from CLI + Defaults
     p.add_argument("--max-files", type=int, default=0, help="Debug: max files to ingest")
+    p.add_argument("--limit", type=int, default=0, help="Debug: limit total records per step (0=no limit)")
+    p.add_argument("--batch-size", type=int, default=4096, help="Batch size for Ray Data operations")
+    p.add_argument("--concurrency", type=int, default=None, help="Concurrency for Ray Data operations (None=auto)")
 
     args = p.parse_args()
 
@@ -72,8 +98,59 @@ def main():
     # Better to configure Ray logging.
 
     ray.init(
-        address=args.ray_address if args.ray_address != "local" else None, ignore_reinit_error=True, log_to_driver=True
-    )  # log_to_driver=True ensures we capture it.
+        address=args.ray_address if args.ray_address != "local" else None,
+        ignore_reinit_error=True,
+        log_to_driver=False,
+        logging_level=logging.INFO,
+        configure_logging=False,  # We handle logging
+    )
+
+    # Force Ray logs to file only (do this AFTER init as Ray might re-add handlers)
+    # We grab the file handler from the root logger (set by setup_logging)
+    root_file_handler = None
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.FileHandler):
+            root_file_handler = h
+            break
+
+    def silence_ray_loggers():
+        """
+        Configure Ray loggers to write ONLY to the pipeline log file and NOT to the terminal.
+        """
+        if not root_file_handler:
+            return
+
+        # 1. Disable Ray Data Progress Bars
+        try:
+            from ray.data import DataContext
+
+            DataContext.get_current().enable_progress_bars = False
+        except ImportError:
+            pass
+        except Exception as e:
+            # If ray isn't fully set up yet, this might fail, but it's usually safe
+            logger.warning(f"Could not disable Ray Data progress bars: {e}")
+
+        # 2. Configure loggers
+        # We focus on the main culprits identified by the user and docs
+        # ray.data is the one producing "Running Dataset..." (if progress bars are on) and INFO logs
+        target_loggers = ["ray.data", "ray", "ray.serve"]
+
+        for name in target_loggers:
+            lg = logging.getLogger(name)
+            # Ensure it doesn't print to stdout/stderr (root)
+            lg.propagate = False
+            # Set level to INFO so we still capture useful info in the file (as requested by user)
+            lg.setLevel(logging.INFO)
+
+            # Clear existing handlers (like default StreamHandlers)
+            lg.handlers.clear()
+
+            # Add OUR file handler so it goes to the file
+            lg.addHandler(root_file_handler)
+
+    # Call it once after init
+    silence_ray_loggers()
 
     # Define steps
     # We need to import the functions now. I will assume they exist for the plan.
@@ -137,6 +214,7 @@ def main():
     context = {
         "output_base": args.output_base,
         "max_files": args.max_files,
+        "limit": args.limit,
         # Add other shared configs
     }
 
@@ -149,6 +227,9 @@ def main():
         # Add derived paths
         step_args.output_dir = args.output_base
         # Specific step defaults can be handled inside step functions if missing
+
+        # Ensure we silence Ray again before each step as lazy loading might have reset it
+        silence_ray_loggers()
 
         run_step(name, func, step_args, logger)
 

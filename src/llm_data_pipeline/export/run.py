@@ -37,8 +37,17 @@ def run_export(args) -> dict:
     dtype = np.uint16 if dtype_str == "uint16" else np.int32
 
     total_tokens = 0
+    limit = getattr(args, "limit", 0)
+    files_processed = 0
+
     with open(output_file, "wb") as f:
         for pf in files:
+            if limit > 0 and files_processed >= limit:
+                print(f"DEBUG: Reached file limit {limit} for export. Stopping.")
+                break
+
+            files_processed += 1
+
             table = pq.read_table(pf, columns=["input_ids"])
             # table has one column "input_ids" which is FixedSizeList or List
             # We flatten it.

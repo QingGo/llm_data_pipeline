@@ -35,6 +35,11 @@ def run_quality(args) -> dict:
         raise RuntimeError(f"Model not found at {model_path}. Please download it first.")
 
     ds = rd.read_parquet(str(input_path.absolute()))
+
+    limit = getattr(args, "limit", 0)
+    if limit > 0:
+        print(f"DEBUG: Limiting quality input to {limit} records.")
+        ds = ds.limit(limit)
     print(f"Reading {ds.count()} docs from {input_path}")
 
     langs_str = getattr(args, "langs", "zh,en")
