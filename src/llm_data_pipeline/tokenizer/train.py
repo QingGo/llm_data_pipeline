@@ -124,6 +124,62 @@ def compare_token_lengths(spm_model_path: Path, text: str):
     }
 
 
+def run_train_tokenizer(args) -> dict:
+    """Train tokenizer step"""
+    base_out = getattr(args, "output_dir", "./outputs/dev")
+    input_path = Path(getattr(args, "parquet_dir", f"{base_out}/quality_parquet"))
+    # In shell script: --work_dir outputs/dev/tokenizers/working
+    # --model_prefix outputs/dev/tokenizers/my_spm
+
+    # We defaults based on base_out if not set
+    work_dir = Path(getattr(args, "work_dir", f"{base_out}/tokenizers/working"))
+    model_prefix = Path(getattr(args, "model_prefix", f"{base_out}/tokenizers/my_spm"))
+
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input path {input_path} does not exist for training tokenizer.")
+
+    shard_dir = work_dir / "corpus_txt"
+
+    num_shards = getattr(args, "num_shards", 256)
+    max_chars = getattr(args, "max_chars", 5000)
+    vocab_size = getattr(args, "vocab_size", 32000)
+    input_sentence_size = getattr(args, "input_sentence_size", 5_000_000)
+    model_type = getattr(args, "model_type", "bpe")
+    character_coverage = getattr(args, "character_coverage", 0.9995)
+    sample_text = getattr(
+        args, "sample_text", "我希望用同一段中文，比较自定义 tokenizer 与 Llama 3 tokenizer 的编码长度，并计算压缩率。"
+    )
+
+    print("Step 1) Write text shards from parquet...")
+    txt_paths = write_shards_with_ray(
+        parquet_dir=input_path,
+        out_dir=shard_dir,
+        num_shards=num_shards,
+        max_chars=max_chars,
+    )
+    print(f"  wrote {len(txt_paths)} shard files into {shard_dir}")
+
+    print("\nStep 2) Train SentencePiece...")
+    train_sentencepiece_py(
+        input_txt_paths=txt_paths,
+        model_prefix=model_prefix,
+        vocab_size=vocab_size,
+        input_sentence_size=input_sentence_size,
+        model_type=model_type,
+        character_coverage=character_coverage,
+    )
+
+    spm_model_path = Path(str(model_prefix) + ".model")
+    print("\nStep 3) Compare token lengths...")
+    stats = compare_token_lengths(
+        spm_model_path=spm_model_path,
+        text=sample_text,
+    )
+
+    stats["model_path"] = str(spm_model_path)
+    return stats
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--parquet_dir", type=str, default="./outputs/dev/cleaned_parquet")
@@ -151,39 +207,6 @@ def main():
     )
     args = ap.parse_args()
 
-    parquet_dir = Path(args.parquet_dir)
-    work_dir = Path(args.work_dir)
-    model_prefix = Path(args.model_prefix)
-    shard_dir = work_dir / "corpus_txt"
-
+    # Note: main uses specific defaults, pipeline might override.
     ray.init(ignore_reinit_error=True)
-
-    print("Step 1) Write text shards from parquet...")
-    txt_paths = write_shards_with_ray(
-        parquet_dir=parquet_dir,
-        out_dir=shard_dir,
-        num_shards=args.num_shards,
-        max_chars=args.max_chars,
-    )
-    print(f"  wrote {len(txt_paths)} shard files into {shard_dir}")
-
-    print("\nStep 2) Train SentencePiece...")
-    train_sentencepiece_py(
-        input_txt_paths=txt_paths,
-        model_prefix=model_prefix,
-        vocab_size=args.vocab_size,
-        input_sentence_size=args.input_sentence_size,
-        model_type=args.model_type,
-        character_coverage=args.character_coverage,
-    )
-
-    spm_model_path = Path(str(model_prefix) + ".model")
-    print("\nStep 3) Compare token lengths...")
-    compare_token_lengths(
-        spm_model_path=spm_model_path,
-        text=args.sample_text,
-    )
-
-
-if __name__ == "__main__":
-    main()
+    run_train_tokenizer(args)

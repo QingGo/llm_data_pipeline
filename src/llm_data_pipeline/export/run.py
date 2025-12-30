@@ -13,20 +13,28 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
-    input_dir = Path(args.input_dir)
-    output_file = Path(args.output_file)
+def run_export(args) -> dict:
+    """Export to binary step"""
+    base_out = getattr(args, "output_dir", "./outputs/dev")
+    input_dir = Path(getattr(args, "input_dir", f"{base_out}/token_packing_parquet"))
+    output_file = Path(getattr(args, "output_file", f"{base_out}/final.bin"))
+    dtype_str = getattr(args, "dtype", "uint16")
+
+    if not input_dir.exists():
+        raise FileNotFoundError(
+            f"Input dir {input_dir} does not exist for export."
+        )  # Prone to error if previous step skipped.
+
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     files = sorted(input_dir.glob("*.parquet"))
     if not files:
         print(f"No files found in {input_dir}")
-        return
+        return {"status": "skipped"}
 
-    print(f"Exporting {len(files)} files to {output_file} as {args.dtype}...")
+    print(f"Exporting {len(files)} files to {output_file} as {dtype_str}...")
 
-    dtype = np.uint16 if args.dtype == "uint16" else np.int32
+    dtype = np.uint16 if dtype_str == "uint16" else np.int32
 
     total_tokens = 0
     with open(output_file, "wb") as f:
@@ -48,7 +56,7 @@ def main():
                 flat_values = chunk.values.to_numpy()
 
                 # Check bounds if uint16
-                if args.dtype == "uint16":
+                if dtype_str == "uint16":
                     if flat_values.max() >= 65535:
                         print("WARNING: Token ID > 65535 found, but exporting as uint16!")
 
@@ -58,6 +66,9 @@ def main():
 
     print(f"Done. Wrote {total_tokens} tokens to {output_file}")
 
+    return {"files_processed": len(files), "total_tokens": total_tokens, "output_file": str(output_file)}
 
-if __name__ == "__main__":
-    main()
+
+def main():
+    args = parse_args()
+    run_export(args)

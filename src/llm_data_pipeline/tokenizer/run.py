@@ -237,6 +237,183 @@ def write_parquet_shard(
 # -----------------------------
 # Pipeline
 # -----------------------------
+def run_tokenize(args) -> dict:
+    """Tokenize and pack step"""
+    base_out = getattr(args, "output_dir", "./outputs/dev")
+    input_dir = getattr(args, "input_dir", f"{base_out}/quality_parquet")
+    output_dir = getattr(
+        args, "output_dir_packing", f"{base_out}/token_packing_parquet"
+    )  # Note: output_dir arg conflicts with base_out in pipeline if we aren't careful.
+    # In pipeline loop, args.output_dir is set to base_out.
+    # But this module interprets output_dir as the specific output folder.
+    # We should prefer specific args if set, else construct from base.
+
+    # Correction: The args object passed in might have "output_dir" set to "outputs/dev".
+    # But tokenizer/run.py expects "output_dir" to be the actual destination.
+    # We need to distinguish.
+
+    # If called from CLI, output_dir is destination.
+    # If called from pipeline, args.output_dir is base.
+    # Let's check if "output_dir" looks like a base or explicit.
+    # Ideally pipeline should set a different attr or we check.
+
+    # To be safe, if output_dir ends with "token_packing_parquet", use it.
+    # Else construct it.
+
+    # But wait, args is a Namespace.
+    # I will modify pipeline to NOT overwrite output_dir if possible or use a different key.
+    # Or checking here:
+
+    potential_out = getattr(args, "output_dir", None)
+    if potential_out and str(potential_out).endswith("token_packing_parquet"):
+        out_path = str(potential_out)
+    else:
+        base = potential_out if potential_out else "./outputs/dev"
+        out_path = os.path.join(base, "token_packing_parquet")
+
+    # input_dir default also needs care
+    potential_in = getattr(args, "input_dir", None)
+    if potential_in:
+        in_path = str(potential_in)
+    else:
+        # Default input for tokenize is quality_parquet
+        base = getattr(args, "output_dir", "./outputs/dev")
+        in_path = os.path.join(base, "quality_parquet")
+
+    spm_model = getattr(args, "spm_model", os.path.join(base_out, "tokenizers/spm32k/spm_32k.model"))
+
+    os.makedirs(out_path, exist_ok=True)
+
+    # args mapping
+    text_col = getattr(args, "text_col", "text")
+    seq_len = getattr(args, "seq_len", 4096)
+    num_proc = getattr(args, "num_proc", max(1, os.cpu_count() // 2))
+    batch_size = getattr(args, "batch_size", 512)
+    writer_batch_size = getattr(args, "writer_batch_size", 4096)
+    shard_chunks = getattr(args, "shard_chunks", 2048)
+    compression = getattr(args, "compression", "zstd")
+
+    add_eos = getattr(args, "add_eos", True)
+    ensure_eos = getattr(args, "ensure_eos", True)
+    drop_remainder = getattr(args, "drop_remainder", True)
+    emit_seq_id = getattr(args, "emit_seq_id", False)
+    emit_seq_lens_offsets = getattr(args, "emit_seq_lens_offsets", False)
+
+    parquet_files = sorted(glob.glob(os.path.join(in_path, "*.parquet")))
+    if not parquet_files:
+        print(f"No parquet files found under: {in_path}")
+        return {"status": "skipped", "reason": "no_input_files"}
+
+    # 1) Load parquet dataset (HF datasets)
+    ds = load_dataset(
+        "parquet",
+        data_files=parquet_files,
+        split="train",
+    )
+    if text_col not in ds.column_names:
+        raise KeyError(f"Column '{text_col}' not found. Available: {ds.column_names}")
+
+    # 2) Tokenize with datasets.map(num_proc=N)
+    spm_model_path = spm_model
+    if not os.path.exists(spm_model_path):
+        raise FileNotFoundError(f"SPM model not found at {spm_model_path}")
+
+    def tokenize_batch(batch: dict[str, list[Any]]) -> dict[str, Any]:
+        sp = _get_sp(spm_model_path)
+        texts = batch[text_col]
+        out_ids: list[list[int]] = []
+        out_len: list[int] = []
+        for t in texts:
+            if t is None:
+                out_ids.append([])
+                out_len.append(0)
+                continue
+            s = str(t)
+            if not s:
+                out_ids.append([])
+                out_len.append(0)
+                continue
+            ids = sp.encode(s, out_type=int)  # pyright: ignore[reportAttributeAccessIssue]
+            out_ids.append(ids)
+            out_len.append(len(ids))
+        return {"input_ids": out_ids, "length": out_len}
+
+    original_cols = ds.column_names
+    ds_tok = ds.map(
+        tokenize_batch,
+        batched=True,
+        batch_size=batch_size,
+        num_proc=num_proc,
+        remove_columns=original_cols,
+        writer_batch_size=writer_batch_size,
+        desc=f"Tokenizing with sentencepiece (num_proc={num_proc})",
+    )
+
+    # Resolve eos_id once (in main process)
+    sp_main = _get_sp(spm_model_path)
+    eos_id = _resolve_eos_id(sp_main)
+
+    # 3) Stream pack: Concat -> Chunk to seq_len
+    # Use ds_tok["input_ids"] as a Python iterable of lists (memory-mapped Arrow; OK)
+    token_iter = (row for row in ds_tok["input_ids"])
+
+    packer = ConstantLengthDataset(
+        token_iter=token_iter,
+        seq_len=seq_len,
+        eos_id=eos_id,
+        add_eos=add_eos,
+        ensure_eos=ensure_eos,
+        drop_remainder=drop_remainder,
+        emit_seq_id=emit_seq_id,
+        emit_seq_lens_offsets=emit_seq_lens_offsets,
+    )
+
+    # 4) Save to disk as parquet shards
+    comp_arg = None if compression == "none" else compression
+
+    shard_idx = 0
+    rows_buf: list[dict[str, Any]] = []
+    total_chunks = 0
+
+    for item in packer:
+        rows_buf.append(item)
+        if len(rows_buf) >= shard_chunks:
+            out_file = os.path.join(out_path, f"packed_{shard_idx:05d}.parquet")
+            write_parquet_shard(out_file, rows_buf, seq_len=seq_len, compression=(comp_arg or "none"))
+            total_chunks += len(rows_buf)
+            rows_buf.clear()
+            shard_idx += 1
+
+    if rows_buf:
+        out_file = os.path.join(out_path, f"packed_{shard_idx:05d}.parquet")
+        write_parquet_shard(out_file, rows_buf, seq_len=seq_len, compression=(comp_arg or "none"))
+        total_chunks += len(rows_buf)
+        rows_buf.clear()
+
+    meta = {
+        "seq_len": seq_len,
+        "eos_id": eos_id,
+        "spm_model": os.path.abspath(spm_model_path),
+        "input_dir": os.path.abspath(in_path),
+        "output_dir": os.path.abspath(out_path),
+        "num_proc": num_proc,
+        "drop_remainder": drop_remainder,
+        "add_eos": add_eos,
+        "ensure_eos": ensure_eos,
+        "emit_seq_id": emit_seq_id,
+        "emit_seq_lens_offsets": emit_seq_lens_offsets,
+        "total_chunks": total_chunks,
+        "total_tokens_out": int(total_chunks) * int(seq_len),
+    }
+    with open(os.path.join(out_path, "packing_meta.json"), "w", encoding="utf-8") as f:
+        json.dump(meta, f, ensure_ascii=False, indent=2)
+
+    print(f"[OK] Wrote {total_chunks} packed chunks to: {out_path}")
+    print(f"[Meta] {os.path.join(out_path, 'packing_meta.json')}")
+
+    return meta
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--spm_model", type=str, default="outputs/dev/tokenizers/spm32k/spm_32k.model")
@@ -276,120 +453,8 @@ def main() -> None:
     ap.add_argument("--compression", type=str, default="zstd", choices=["zstd", "snappy", "gzip", "brotli", "none"])
     args = ap.parse_args()
 
-    os.makedirs(args.output_dir, exist_ok=True)
+    run_tokenize(args)
 
-    parquet_files = sorted(glob.glob(os.path.join(args.input_dir, "*.parquet")))
-    if not parquet_files:
-        raise FileNotFoundError(f"No parquet files found under: {args.input_dir}")
-
-    # 1) Load parquet dataset (HF datasets)
-    ds = load_dataset(
-        "parquet",
-        data_files=parquet_files,
-        split="train",
-    )
-    if args.text_col not in ds.column_names:
-        raise KeyError(f"Column '{args.text_col}' not found. Available: {ds.column_names}")
-
-    # 2) Tokenize with datasets.map(num_proc=N)
-    spm_model_path = args.spm_model
-
-    def tokenize_batch(batch: dict[str, list[Any]]) -> dict[str, Any]:
-        sp = _get_sp(spm_model_path)
-        texts = batch[args.text_col]
-        out_ids: list[list[int]] = []
-        out_len: list[int] = []
-        for t in texts:
-            if t is None:
-                out_ids.append([])
-                out_len.append(0)
-                continue
-            s = str(t)
-            if not s:
-                out_ids.append([])
-                out_len.append(0)
-                continue
-            ids = sp.encode(s, out_type=int)  # pyright: ignore[reportAttributeAccessIssue]
-            out_ids.append(ids)
-            out_len.append(len(ids))
-        return {"input_ids": out_ids, "length": out_len}
-
-    original_cols = ds.column_names
-    ds_tok = ds.map(
-        tokenize_batch,
-        batched=True,
-        batch_size=args.batch_size,
-        num_proc=args.num_proc,
-        remove_columns=original_cols,
-        writer_batch_size=args.writer_batch_size,
-        desc=f"Tokenizing with sentencepiece (num_proc={args.num_proc})",
-    )
-
-    # Resolve eos_id once (in main process)
-    sp_main = _get_sp(spm_model_path)
-    eos_id = _resolve_eos_id(sp_main)
-
-    # 3) Stream pack: Concat -> Chunk to seq_len
-    # Use ds_tok["input_ids"] as a Python iterable of lists (memory-mapped Arrow; OK)
-    token_iter = (row for row in ds_tok["input_ids"])
-
-    packer = ConstantLengthDataset(
-        token_iter=token_iter,
-        seq_len=args.seq_len,
-        eos_id=eos_id,
-        add_eos=args.add_eos,
-        ensure_eos=args.ensure_eos,
-        drop_remainder=args.drop_remainder,
-        emit_seq_id=args.emit_seq_id,
-        emit_seq_lens_offsets=args.emit_seq_lens_offsets,
-    )
-
-    # 4) Save to disk as parquet shards
-    compression = None if args.compression == "none" else args.compression
-
-    shard_idx = 0
-    rows_buf: list[dict[str, Any]] = []
-    total_chunks = 0
-
-    for item in packer:
-        rows_buf.append(item)
-        if len(rows_buf) >= args.shard_chunks:
-            out_path = os.path.join(args.output_dir, f"packed_{shard_idx:05d}.parquet")
-            write_parquet_shard(out_path, rows_buf, seq_len=args.seq_len, compression=(compression or "none"))
-            total_chunks += len(rows_buf)
-            rows_buf.clear()
-            shard_idx += 1
-
-    if rows_buf:
-        out_path = os.path.join(args.output_dir, f"packed_{shard_idx:05d}.parquet")
-        write_parquet_shard(out_path, rows_buf, seq_len=args.seq_len, compression=(compression or "none"))
-        total_chunks += len(rows_buf)
-        rows_buf.clear()
-
-    meta = {
-        "seq_len": args.seq_len,
-        "eos_id": eos_id,
-        "spm_model": os.path.abspath(spm_model_path),
-        "input_dir": os.path.abspath(args.input_dir),
-        "output_dir": os.path.abspath(args.output_dir),
-        "num_proc": args.num_proc,
-        "drop_remainder": args.drop_remainder,
-        "add_eos": args.add_eos,
-        "ensure_eos": args.ensure_eos,
-        "emit_seq_id": args.emit_seq_id,
-        "emit_seq_lens_offsets": args.emit_seq_lens_offsets,
-        "total_chunks": total_chunks,
-        "total_tokens_out": int(total_chunks) * int(args.seq_len),
-    }
-    with open(os.path.join(args.output_dir, "packing_meta.json"), "w", encoding="utf-8") as f:
-        json.dump(meta, f, ensure_ascii=False, indent=2)
-
-    print(f"[OK] Wrote {total_chunks} packed chunks to: {args.output_dir}")
-    print(f"[Meta] {os.path.join(args.output_dir, 'packing_meta.json')}")
-
-
-if __name__ == "__main__":
-    main()
 
 """
 uv run src/llm_data_pipeline/tokenizer/run.py \

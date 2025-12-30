@@ -33,42 +33,63 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
-    """入口函数：初始化 Ray，读取数据，执行清洗并写出结果"""
-    args = parse_args()
-    ray.init(address=args.ray_address or None)
+def run_clean(args) -> dict:
+    """Pipeline entry point for cleaning"""
+    # Resolve paths
+    base_out = getattr(args, "output_dir", "./outputs/dev")
+    input_path = Path(getattr(args, "input", f"{base_out}/ingest_parquet"))
+    output_dir = Path(base_out)
 
-    input_path = Path(args.input)
+    # Check input
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input path {input_path} does not exist for clean step.")
+
     ds = rd.read_parquet(str(input_path.absolute()))
 
     rules = CleanRules(
-        min_chars=args.min_chars,
-        max_chars=args.max_chars,
-        min_non_ws_ratio=args.min_non_ws_ratio,
-        min_alpha_cjk_ratio=args.min_alpha_cjk_ratio,
-        max_punct_ratio=args.max_punct_ratio,
-        max_dup_line_ratio=args.max_dup_line_ratio,
+        min_chars=getattr(args, "min_chars", 200),
+        max_chars=getattr(args, "max_chars", 200_000),
+        min_non_ws_ratio=getattr(args, "min_non_ws_ratio", 0.7),
+        min_alpha_cjk_ratio=getattr(args, "min_alpha_cjk_ratio", 0.4),
+        max_punct_ratio=getattr(args, "max_punct_ratio", 0.25),
+        max_dup_line_ratio=getattr(args, "max_dup_line_ratio", 0.35),
     )
+
+    batch_size = getattr(args, "batch_size", 256)
+    taskpool_size = getattr(args, "taskpool_size", 0)
+    num_cpus = getattr(args, "num_cpus", 1.0)
 
     kept_ds, drop_ds = clean_dataset(
         ds,
-        CleanConfig(batch_size=args.batch_size, rules=rules),
-        taskpool_size=args.taskpool_size,
-        num_cpus=args.num_cpus,
+        CleanConfig(batch_size=batch_size, rules=rules),
+        taskpool_size=taskpool_size,
+        num_cpus=num_cpus,
     )
 
-    out = Path(args.output_dir)
-    kept_dir = out / "cleaned_parquet"
-    drop_dir = out / "dropped_parquet"
+    kept_dir = output_dir / "cleaned_parquet"
+    drop_dir = output_dir / "dropped_parquet"
     kept_dir.mkdir(parents=True, exist_ok=True)
     drop_dir.mkdir(parents=True, exist_ok=True)
 
+    print(f"Writing clean results to {kept_dir}...")
     kept_ds.write_parquet(str(kept_dir.absolute()))
+    # Optional: write dropped? User said "specify which files to land".
+    # For now assume we write both as before, or maybe skip dropped if not debug.
+    # The original code wrote both. I'll keep writing both for safety/debug.
     drop_ds.write_parquet(str(drop_dir.absolute()))
 
-    print("kept_count =", kept_ds.count())
-    print("drop_count =", drop_ds.count())
+    kept_count = kept_ds.count()
+    drop_count = drop_ds.count()
+    print("kept_count =", kept_count)
+    print("drop_count =", drop_count)
+
+    return {"input_count": ds.count(), "kept_count": kept_count, "drop_count": drop_count, "output_path": str(kept_dir)}
 
 
-if __name__ == "__main__":
-    main()
+def main() -> None:
+    """Cli wrapper"""
+    args = parse_args()
+    ray.init(address=args.ray_address or None)
+    # Adapter for standalone run
+    # args.input and args.output_dir are set by argparse
+    run_clean(args)

@@ -19,26 +19,33 @@ def parse_args():
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
-    ray.init(address=args.ray_address, ignore_reinit_error=True)
+def run_quality(args) -> dict:
+    """Quality filtering step"""
+    base_out = getattr(args, "output_dir", "./outputs/dev")
+    input_path = Path(getattr(args, "input", f"{base_out}/deduped_parquet"))
+    output_dir = Path(base_out)
 
-    # Check model existence
-    if not os.path.exists(args.model_path):
-        raise RuntimeError(f"Model not found at {args.model_path}. Please download it first.")
+    # Model path - handle default relative to project root usually
+    # or passed by pipeline. pipeline passes args including model_path if set.
+    model_path = getattr(args, "model_path", "./models/lid.176.bin")
 
-    input_path = Path(args.input)
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input path {input_path} does not exist for quality filter.")
+    if not os.path.exists(model_path):
+        raise RuntimeError(f"Model not found at {model_path}. Please download it first.")
+
     ds = rd.read_parquet(str(input_path.absolute()))
-
     print(f"Reading {ds.count()} docs from {input_path}")
 
-    langs = args.langs.split(",")
+    langs_str = getattr(args, "langs", "zh,en")
+    langs = langs_str.split(",")
+    threshold = getattr(args, "threshold", 0.4)
+
     # We load model in actor or use map_batches with class init to amortize load time?
     # Ray data Actors are best for this.
-
     class QualityMapper:
         def __init__(self):
-            self.filter = LanguageFilter(model_path=args.model_path, allowed_langs=langs, threshold=args.threshold)
+            self.filter = LanguageFilter(model_path=model_path, allowed_langs=langs, threshold=threshold)
 
         def __call__(self, row):
             text = row.get("text", "")
@@ -48,25 +55,25 @@ def main():
             row["lang_score"] = score
             return row
 
-    # Ray Data 2.x: compute=ray.data.ActorPoolStrategy(size=...)
-    # We use map with concurrency. Since model needs loading, let's just use simple map and rely on Ray's smarts
-    # or explicitly use map_batches with setup if we want efficiency.
-    # For now simple map with class-based callable (Ray will instantiate it).
-
     ds_scored = ds.map(QualityMapper, compute=ray.data.ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4))
 
     # Filter
     ds_kept = ds_scored.filter(lambda r: r["quality_keep"])
 
-    out_dir = Path(args.output_dir) / "quality_parquet"
+    out_dir = output_dir / "quality_parquet"
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print(f"Writing kept docs to {out_dir}...")
     ds_kept.write_parquet(str(out_dir))
 
     kept_count = ds_kept.count()
-    print(f"Done. Kept {kept_count} / {ds.count()} docs.")
+    orig_count = ds.count()
+    print(f"Done. Kept {kept_count} / {orig_count} docs.")
+
+    return {"input_docs": orig_count, "kept_docs": kept_count, "output_path": str(out_dir)}
 
 
-if __name__ == "__main__":
-    main()
+def main():
+    args = parse_args()
+    ray.init(address=args.ray_address, ignore_reinit_error=True)
+    run_quality(args)

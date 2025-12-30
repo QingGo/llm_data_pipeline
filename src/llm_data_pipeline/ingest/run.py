@@ -35,43 +35,73 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main() -> None:
-    """入口函数：初始化 Ray，构建数据集，派发解析并写出结果"""
-    args = parse_args()
-    venv_path = os.environ.get("VIRTUAL_ENV")
-    ray.init(
-        address=args.ray_address, object_store_memory=2 * 1024**3, runtime_env={"python": f"{venv_path}/bin/python"}
-    )
+def run_ingest(args) -> dict:
+    """Pipeline entry point"""
+    # map args
+    data_dir = Path(getattr(args, "data_dir", "./data/commoncrawl/"))
+    pattern = getattr(args, "pattern", "**/*.wet.gz")
 
-    data_dir = Path(args.data_dir)
-    files = discover_files(data_dir, args.pattern)
-    if args.max_files and args.max_files > 0:
-        files = files[: args.max_files]
+    # Use output_dir from pipeline if available, else default
+    base_out = getattr(args, "output_dir", "./outputs/dev")
+    output_path = Path(base_out) / "ingest_parquet"
+
+    max_files = getattr(args, "max_files", 0)
+    taskpool_size = getattr(args, "taskpool_size", 0)
+    num_cpus = getattr(args, "num_cpus", 1.0)
+
+    # ray.init is handled by pipeline
+
+    files = discover_files(data_dir, pattern)
+    if max_files and max_files > 0:
+        files = files[:max_files]
 
     cfg = IngestConfig(
-        min_text_chars=args.min_text_chars,
-        max_text_chars=args.max_text_chars,
-        max_docs_per_file=args.max_docs_per_file,
+        min_text_chars=getattr(args, "min_text_chars", 200),
+        max_text_chars=getattr(args, "max_text_chars", 200_000),
+        max_docs_per_file=getattr(args, "max_docs_per_file", 0),
     )
 
-    # 注意：这里不 read_binary_files（避免把大文件 bytes 搬进 object store）
-    # 直接把“路径列表”做成 dataset，再在 worker 上打开文件解析。
+    # dataset from items
     ds_files = rd.from_items([{"path": str(p.absolute())} for p in files])
 
-    compute = rd.ActorPoolStrategy(size=args.taskpool_size) if args.taskpool_size else None
+    compute = rd.ActorPoolStrategy(size=taskpool_size) if taskpool_size else None
 
     ds_docs = ds_files.flat_map(
         lambda r: extract_wet_gz_file(Path(r["path"]), cfg),
         compute=compute,
-        num_cpus=args.num_cpus,
+        num_cpus=num_cpus,
     )
-    output_path = Path(args.output)
+
     output_path.mkdir(parents=True, exist_ok=True)
+    print(f"Writing ingest result to {output_path}...")
     ds_docs.write_parquet(str(output_path.absolute()))
 
+    doc_count = ds_docs.count()
     print("files =", len(files))
-    print("docs_count =", ds_docs.count())
+    print("docs_count =", doc_count)
+
+    return {"files_processed": len(files), "docs_ingested": doc_count, "output_path": str(output_path)}
 
 
-if __name__ == "__main__":
-    main()
+def main() -> None:
+    """Cli wrapper"""
+    args = parse_args()
+    # Standalone mode: init ray
+    venv_path = os.environ.get("VIRTUAL_ENV")
+    ray.init(
+        address=args.ray_address, object_store_memory=2 * 1024**3, runtime_env={"python": f"{venv_path}/bin/python"}
+    )
+    # Map cli args to what run_ingest expects
+    # In standalone, args.output is explicit
+    # run_ingest expects output_dir to build output_dir/ingest_parquet
+    # We cheat a bit or adjust run_ingest.
+    # Let's adjust run_ingest to respect 'output' if passed, else derive.
+
+    # Actually, main() is rarely used now.
+    # Just setting output_dir -> output.parent if possible?
+    # run_ingest uses `output_dir` / `ingest_parquet`.
+    # default args.output is outputs/dev/ingest_parquet.
+    # so output_dir should be outputs/dev.
+
+    args.output_dir = str(Path(args.output).parent)
+    run_ingest(args)

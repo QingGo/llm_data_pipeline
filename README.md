@@ -16,7 +16,6 @@ llm-data-pipeline/
 │     ├─ tokenizer/                 # Tokenizer 相关：语料导出、训练、benchmark（vs tiktoken）、demo/分析脚本
 │     └─ tools/                     # 通用工具：sanity check、metrics、funnel、compare runs、repro/manifest 校验等
 ├─ docs/                            # 面向读者的文档：runbook、架构、取舍、消融、简历 bullet（不放大数据）
-├─ reports/                         # 每日/每周实验记录（人类可读）：指标解读、样例、阈值选择、复盘
 ├─ outputs/                         # 管线产物与 checkpoint：按 sample/dev/stage/prod 分层，gitignore 掉
 ├─ runs/                            # 每次跑的指标快照（默认不进 git）：用于 before/after 对比与性能回归，gitignore 掉
 └─ data/                            # 数据“指针”目录：只放软链接/路径说明/小样索引；raw 数据实际放项目外，gitignore 掉
