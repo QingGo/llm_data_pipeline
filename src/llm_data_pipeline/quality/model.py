@@ -15,7 +15,7 @@ logger = logging.getLogger(__name__)
 def _patched_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
     def check(entry: str) -> str:
         if entry.find("\n") != -1:
-            raise ValueError("predict processes one line at a time (remove '\\n')")
+            raise ValueError("predict processes one line at a time (remove '\n')")
         return entry + "\n"
 
     # batch
@@ -30,7 +30,7 @@ def _patched_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
     text = check(text)
     predictions = self.f.predict(text, k, threshold, on_unicode_error)  # [(prob, label), ...]
     if predictions:
-        probs, labels = zip(*predictions)  # unzip
+        probs, labels = zip(*predictions, strict=True)  # unzip
     else:
         probs, labels = ([], ())
 
@@ -71,9 +71,8 @@ class QualityFilter:
 
         # 取全量 label 的分数，避免 k 设置不够导致取不到目标 label
         labels, probs = self.model.predict(text, k=len(self.all_labels) + 1)
-        m = dict(zip(labels, map(float, probs)))
-        # logger.debug(f"len={len(text)} scores={m}")
-        score_map: dict[str, float] = dict(zip(labels, probs))
+        # logger.debug(f"len={len(text)} scores={dict(zip(labels, map(float, probs)))}")
+        score_map: dict[str, float] = dict(zip(labels, probs, strict=True))
         pos_label = self.pos_label
         if pos_label is None:
             raise ValueError("pos_label must be set to a valid label.")
@@ -94,19 +93,93 @@ class QualityFilter:
 if __name__ == "__main__":
     samples = [
         # --- 正例：高质量百科/学术文本 (预期保留) ---
-        "ABOUT AWB KIDS ARE KIDS JOIN THE CAST << Back to AWB News Christine Rouse is honored on the “Today Show” The executive director of Acting Without Boundaries (AWB), Christine Rouse, was featured on the NBC Today Show with “Kathie Lee and Hoda” on March 1, 2012. The monthly segment, called “Everyone Has A Story,” features one ordinary person that has had a life-changing experience in their own life. Christine submitted an essay describing her life’s mission of increasing awareness of and support for people with disabilities. She described the process of creating the two non-profits she manages – “Kids are Kids,” which provides disability awareness workshops and AWB which provides theater arts opportunities for children, youth and young adults with physical disabilities . Christine talked about the importance of both in increasing inclusion for people, especially young people, with physical disabilities. The March “Everyone Has A Story” segment featured Christine, her mother, and her brother. Christine’s mother read a letter she wrote about Christine’s life and the pride she takes in her many accomplishments. John Tartaglia, a Broadway performer sang a song written for Christine – “Different is Beautiful”- by Kathie Lee Gifford and David Freidman. The song has a powerful message and will be performed by AWB actors in the near future. To cap off this exciting experience, the Today Show honored Christine’s work with $1000 donations to each of her organizations, Kids are Kids and AWB. 750 E. Haverford Road, Bryn Mawr, PA 19010 Email: mmurphy@awb2004.org",
-        """<li><b>astro-ph.EP - Earth and Planetary Astrophysics</b> (<a href="/list/astro-ph.EP/new">new</a>, <a href="/list/astro-ph.EP/recent">recent</a>, <a href="/list/astro-ph.EP/current">current month</a>) <div class="description">Interplanetary medium, planetary physics, planetary astrobiology, extrasolar planets, comets, asteroids, meteorites. Structure and formation of the solar system</div> </li>""",
-        "https://arxiv.org/abs/1706.03762 Abstract We propose the Transformer, a neural network architecture based solely on attention mechanisms, dispensing with recurrence and convolutions. We evaluate on machine translation benchmarks and analyze training cost, parallelization, and scaling behavior. References include BLEU, WMT, and attention ablations. © arXiv.org",
-        "We study recurrent neural networks for sequence modeling and compare gated variants under a controlled experimental protocol. Across three benchmarks, the gated architectures converge faster and exhibit reduced gradient instability when the sequence length increases. Our implementation details and hyperparameters are reported to support reproducibility.",
-        "This document specifies the behavior of a client and server during a handshake protocol that negotiates cryptographic parameters. Implementations MUST validate peer identities, enforce minimum key sizes, and reject deprecated ciphersuites. Security considerations discuss downgrade resilience and replay prevention.",
-        "The survey estimates the monthly unemployment rate using a stratified sample and applies seasonal adjustment to improve comparability across years. Sampling error and nonresponse bias are quantified, and confidence intervals are provided for key aggregates. Methodological changes are documented to ensure continuity.",
-        "Let (x_t) denote the hidden state and (y_t) the observation at time (t). Under linear dynamics with Gaussian noise, the Kalman filter yields the minimum mean-square error estimate and a closed-form update for the posterior covariance. The derivation follows directly from conditional Gaussian identities.",
-        "Authentication assurance requires resistance to phishing, replay, and credential stuffing attacks. Verifiers should rate-limit failed attempts, bind sessions to cryptographic tokens, and log high-risk events for audit. Recovery mechanisms must avoid weakening the primary authenticator.",
-        "The instrument measures spectral radiance over 400–700 nm with a spectral resolution of 1 nm and a radiometric uncertainty below 2% (k=2). Calibration is performed against a traceable reference source, and drift is corrected using daily dark frames. Raw data and processing scripts are archived.",
-        "For adults with community-acquired pneumonia, empiric therapy should be selected based on local resistance patterns and patient risk factors. Treatment duration is typically guided by clinical stability and symptom resolution rather than a fixed number of days. Adverse events and contraindications are summarized for common regimens.",
-        "The device operates from 1.8 V to 3.3 V and supports a maximum clock frequency of 80 MHz under typical conditions. Power consumption scales approximately linearly with frequency, and thermal derating applies above 85°C ambient. Electrical characteristics are specified across process and temperature corners.",
-        "We preprocess text by normalizing Unicode, removing boilerplate navigation elements, and segmenting into paragraphs before feature extraction. The classifier is trained with subword n-grams to improve robustness to rare tokens and spelling variants. Evaluation includes both in-domain and out-of-domain validation sets.",
-        "This dataset contains annotated time-series recordings collected under an approved protocol, with consent and anonymization procedures described. Labels were assigned by two independent raters and adjudicated by a third in cases of disagreement. Versioning and checksum files are provided for integrity verification.",
+        "ABOUT AWB KIDS ARE KIDS JOIN THE CAST << Back to AWB News "
+        "Christine Rouse is honored on the “Today Show” The executive director "
+        "of Acting Without Boundaries (AWB), Christine Rouse, was featured on "
+        "the NBC Today Show with “Kathie Lee and Hoda” on March 1, 2012. The "
+        "monthly segment, called “Everyone Has A Story,” features one ordinary "
+        "person that has had a life-changing experience in their own life. "
+        "Christine submitted an essay describing her life’s mission of increasing "
+        "awareness of and support for people with disabilities. She described "
+        "the process of creating the two non-profits she manages – “Kids are "
+        "Kids,” which provides disability awareness workshops and AWB which "
+        "provides theater arts opportunities for children, youth and young "
+        "adults with physical disabilities. Christine talked about the importance "
+        "of both in increasing inclusion for people, especially young people, "
+        "with physical disabilities. The March “Everyone Has A Story” segment "
+        "featured Christine, her mother, and her brother. Christine’s mother "
+        "read a letter she wrote about Christine’s life and the pride she takes "
+        "in her many accomplishments. John Tartaglia, a Broadway performer sang "
+        "a song written for Christine – “Different is Beautiful”- by Kathie Lee "
+        "Gifford and David Freidman. The song has a powerful message and will "
+        "be performed by AWB actors in the near future. To cap off this exciting "
+        "experience, the Today Show honored Christine’s work with $1000 donations "
+        "to each of her organizations, Kids are Kids and AWB. 750 E. Haverford "
+        "Road, Bryn Mawr, PA 19010 Email: mmurphy@awb2004.org",
+        "<li><b>astro-ph.EP - Earth and Planetary Astrophysics</b> "
+        "(<a href='/list/astro-ph.EP/new'>new</a>, "
+        "<a href='/list/astro-ph.EP/recent'>recent</a>, "
+        "<a href='/list/astro-ph.EP/current'>current month</a>) "
+        "<div class='description'>Interplanetary medium, planetary physics, "
+        "planetary astrobiology, extrasolar planets, comets, asteroids, "
+        "meteorites. Structure and formation of the solar system</div> </li>",
+        "https://arxiv.org/abs/1706.03762 Abstract We propose the Transformer, "
+        "a neural network architecture based solely on attention mechanisms, "
+        "dispensing with recurrence and convolutions. We evaluate on machine "
+        "translation benchmarks and analyze training cost, parallelization, and "
+        "scaling behavior. References include BLEU, WMT, and attention ablations. "
+        "© arXiv.org",
+        "We study recurrent neural networks for sequence modeling and compare "
+        "gated variants under a controlled experimental protocol. Across three "
+        "benchmarks, the gated architectures converge faster and exhibit reduced "
+        "gradient instability when the sequence length increases. Our "
+        "implementation details and hyperparameters are reported to support "
+        "reproducibility.",
+        "This document specifies the behavior of a client and server during a "
+        "handshake protocol that negotiates cryptographic parameters. "
+        "Implementations MUST validate peer identities, enforce minimum key "
+        "sizes, and reject deprecated ciphersuites. Security considerations "
+        "discuss downgrade resilience and replay prevention.",
+        "The survey estimates the monthly unemployment rate using a stratified "
+        "sample and applies seasonal adjustment to improve comparability across "
+        "years. Sampling error and nonresponse bias are quantified, and confidence "
+        "intervals are provided for key aggregates. Methodological changes are "
+        "documented to ensure continuity.",
+        "Let (x_t) denote the hidden state and (y_t) the observation at time "
+        "(t). Under linear dynamics with Gaussian noise, the Kalman filter yields "
+        "the minimum mean-square error estimate and a closed-form update for the "
+        "posterior covariance. The derivation follows directly from conditional "
+        "Gaussian identities.",
+        "Authentication assurance requires resistance to phishing, replay, and "
+        "credential stuffing attacks. Verifiers should rate-limit failed attempts, "
+        "bind sessions to cryptographic tokens, and log high-risk events for "
+        "audit. Recovery mechanisms must avoid weakening the primary "
+        "authenticator.",
+        "The instrument measures spectral radiance over 400–700 nm with a spectral "
+        "resolution of 1 nm and a radiometric uncertainty below 2% (k=2). "
+        "Calibration is performed against a traceable reference source, and drift "
+        "is corrected using daily dark frames. Raw data and processing scripts "
+        "are archived.",
+        "For adults with community-acquired pneumonia, empiric therapy should be "
+        "selected based on local resistance patterns and patient risk factors. "
+        "Treatment duration is typically guided by clinical stability and symptom "
+        "resolution rather than a fixed number of days. Adverse events and "
+        "contraindications are summarized for common regimens.",
+        "The device operates from 1.8 V to 3.3 V and supports a maximum clock "
+        "frequency of 80 MHz under typical conditions. Power consumption scales "
+        "approximately linearly with frequency, and thermal derating applies "
+        "above 85°C ambient. Electrical characteristics are specified across "
+        "process and temperature corners.",
+        "We preprocess text by normalizing Unicode, removing boilerplate "
+        "navigation elements, and segmenting into paragraphs before feature "
+        "extraction. The classifier is trained with subword n-grams to improve "
+        "robustness to rare tokens and spelling variants. Evaluation includes "
+        "both in-domain and out-of-domain validation sets.",
+        "This dataset contains annotated time-series recordings collected under "
+        "an approved protocol, with consent and anonymization procedures "
+        "described. Labels were assigned by two independent raters and "
+        "adjudicated by a third in cases of disagreement. Versioning and "
+        "checksum files are provided for integrity verification.",
         # --- 反例：低质量广告/垃圾文本 (预期丢弃) ---
         "Buy cheap watches now!!! Click here!!! best price $9.99 for rolex replica.",
         "sex dating hot singles in your area! Sign up for free today. 100% free no credit card needed.",

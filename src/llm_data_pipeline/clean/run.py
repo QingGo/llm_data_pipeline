@@ -1,8 +1,6 @@
 """清洗阶段运行入口：读取 ingest 结果并按规则过滤输出"""
 
 import argparse
-import logging
-from pathlib import Path
 
 import ray.data as rd
 
@@ -10,20 +8,16 @@ from llm_data_pipeline.clean.rules import CleanRules
 from llm_data_pipeline.clean.step import CleanConfig, clean_dataset
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
+    validate_input_path,
+    write_parquet,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def add_args(p: argparse.ArgumentParser) -> None:
     """添加 Clean 特有参数"""
-    p.add_argument(
-        "--input",
-        default=None,
-        help="Input directory (default: <output_base>/ingest_parquet)",
-    )
     # rules
     p.add_argument("--taskpool-size", type=int, default=0)
     p.add_argument("--num-cpus", type=float, default=1.0)
@@ -37,19 +31,14 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 def run_clean(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point for cleaning"""
+    logger = PipelineLogger.get()
+
     # Resolve paths
-    manual_input = kwargs.get("input")
-    if manual_input:
-        input_path = Path(manual_input)
-        _, output_dir = resolve_io_paths(config, "clean")
-    else:
-        input_path, output_dir = resolve_io_paths(config, "clean", "ingest")
+    input_path, output_dir = resolve_io_paths(config, "clean", "ingest")
 
-    # Check input
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input path {input_path} does not exist for clean step.")
+    # Validate input path
+    validate_input_path(input_path, "clean")
 
-    logger.info(f"Reading parquet from {input_path}")
     ds = rd.read_parquet(str(input_path.absolute()))
 
     limit = config.limit
@@ -58,17 +47,17 @@ def run_clean(config: PipelineConfig, **kwargs) -> dict:
         ds = ds.limit(limit)
 
     rules = CleanRules(
-        min_chars=getattr(config, "min_chars", kwargs.get("min_chars", 200)),
-        max_chars=getattr(config, "max_chars", kwargs.get("max_chars", 200_000)),
-        min_non_ws_ratio=getattr(config, "min_non_ws_ratio", kwargs.get("min_non_ws_ratio", 0.7)),
-        min_alpha_cjk_ratio=getattr(config, "min_alpha_cjk_ratio", kwargs.get("min_alpha_cjk_ratio", 0.4)),
-        max_punct_ratio=getattr(config, "max_punct_ratio", kwargs.get("max_punct_ratio", 0.25)),
-        max_dup_line_ratio=getattr(config, "max_dup_line_ratio", kwargs.get("max_dup_line_ratio", 0.35)),
+        min_chars=kwargs.get("min_chars", 200),
+        max_chars=kwargs.get("max_chars", 200_000),
+        min_non_ws_ratio=kwargs.get("min_non_ws_ratio", 0.7),
+        min_alpha_cjk_ratio=kwargs.get("min_alpha_cjk_ratio", 0.4),
+        max_punct_ratio=kwargs.get("max_punct_ratio", 0.25),
+        max_dup_line_ratio=kwargs.get("max_dup_line_ratio", 0.35),
     )
 
     batch_size = config.batch_size
-    taskpool_size = getattr(config, "taskpool_size", kwargs.get("taskpool_size", 0))
-    num_cpus = getattr(config, "num_cpus", kwargs.get("num_cpus", 1.0))
+    taskpool_size = kwargs.get("taskpool_size", 0)
+    num_cpus = kwargs.get("num_cpus", 1.0)
 
     kept_ds, drop_ds = clean_dataset(
         ds,
@@ -82,11 +71,10 @@ def run_clean(config: PipelineConfig, **kwargs) -> dict:
     kept_dir.mkdir(parents=True, exist_ok=True)
     drop_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Writing clean results to {kept_dir}...")
-    kept_ds.write_parquet(str(kept_dir.absolute()))
+    write_parquet(kept_ds, kept_dir, logger)
 
     # Optional: write dropped?
-    # drop_ds.write_parquet(str(drop_dir.absolute()))
+    # write_parquet(drop_ds, drop_dir, logger)
 
     kept_count = kept_ds.count()
     drop_count = drop_ds.count()

@@ -1,6 +1,5 @@
 import argparse
 from dataclasses import dataclass
-from typing import Dict, List, Optional
 
 import pyarrow as pa
 import pyarrow.compute as pc
@@ -33,7 +32,10 @@ SSN_RE = r"\b\d{3}-\d{2}-\d{4}\b"
 # Cheap gating triggers (multi-lingual-ish) 粗筛
 # English + Chinese contact keywords (extend as needed)
 # e.g. contact me at ..., 电话：..., 微信：abc123
-CONTACT_KW_RE = r"(?i)\b(contact|call|email\s+me|reach\s+me|tel|phone|ssn|wechat|whatsapp|line|telegram)\b|联系我|电话|手机号|邮箱|微信|QQ|WhatsApp|Telegram|Line"
+CONTACT_KW_RE = (
+    r"(?i)\b(contact|call|email\s+me|reach\s+me|tel|phone|ssn|wechat|whatsapp|line|telegram)\b"
+    r"|联系我|电话|手机号|邮箱|微信|QQ|WhatsApp|Telegram|Line"
+)
 # English "Full Name-like" shape (only used for gating, not final replacement)
 # e.g. John Smith, Alice Johnson
 NAME_SHAPE_EN_RE = r"\b[A-Z][a-z]+ [A-Z][a-z]+\b"
@@ -45,13 +47,13 @@ HAS_CJK_RE = r"[\u4e00-\u9fff]"
 @dataclass
 class Config:
     text_col: str = "text"
-    lang_col: Optional[str] = None  # if exists, use it to route NER language
+    lang_col: str | None = None  # if exists, use it to route NER language
     keep_stats: bool = False  # keep pii_* columns in output
     enable_person_ner: bool = True
     # NER languages to attempt (others skip PERSON redaction)
-    supported_langs: Optional[List[str]] = None
+    supported_langs: list[str] | None = None
     # Presidio spaCy model map
-    spacy_models: Optional[Dict[str, str]] = None
+    spacy_models: dict[str, str] | None = None
     # Analyzer score threshold (lower => more recall)
     ner_score_threshold: float = 0.0
 
@@ -129,11 +131,11 @@ class StructuredPIIRedactor:
             lang_py = lang.to_pylist()
             text_py = text_arr.to_pylist()
             out = []
-            for l, t in zip(lang_py, text_py):
-                if isinstance(l, str) and len(l) >= 2:
-                    out.append(l[:2].lower())
+            for lang_item, text_item in zip(lang_py, text_py, strict=True):
+                if isinstance(lang_item, str) and len(lang_item) >= 2:
+                    out.append(lang_item[:2].lower())
                 else:
-                    out.append("zh" if _has_cjk(t) else "en")
+                    out.append("zh" if _has_cjk(text_item) else "en")
             return pa.array(out, type=pa.string())
         else:
             # heuristic
@@ -142,7 +144,7 @@ class StructuredPIIRedactor:
             return pa.array(out, type=pa.string())
 
 
-def _has_cjk(s: Optional[str]) -> bool:
+def _has_cjk(s: str | None) -> bool:
     if not s:
         return False
     # RE2 in Arrow is fine, but here we keep it python-level for per-row fallback only.
@@ -223,7 +225,7 @@ class PresidioPersonNER:
 
         # Process row-by-row (Presidio analyze is per-text).
         # We skip rows not in need_ner or unsupported languages.
-        for i, (t, lang, do_ner) in enumerate(zip(text, langs, need)):
+        for i, (t, lang, do_ner) in enumerate(zip(text, langs, need, strict=True)):
             if not do_ner or not isinstance(t, str) or not t:
                 continue
             if not isinstance(lang, str) or lang not in self.cfg.supported_langs:

@@ -1,18 +1,18 @@
 import argparse
-import logging
 import os
-from pathlib import Path
 
 import ray.data as rd
+from ray.data import ActorPoolStrategy
 
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
+    validate_input_path,
+    write_parquet,
 )
 from llm_data_pipeline.dedup.minhash import VectorizedMinHash
-
-logger = logging.getLogger(__name__)
 
 
 class MinHashCompute:
@@ -44,16 +44,13 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     """Computes MinHash signatures for dedup."""
+    logger = PipelineLogger.get()
+    
     # Resolve paths
-    manual_input = kwargs.get("input")
-    if manual_input:
-        input_path = Path(manual_input)
-        _, output_dir = resolve_io_paths(config, "minhash")
-    else:
-        input_path, output_dir = resolve_io_paths(config, "minhash", "clean")
-
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input path {input_path} does not exist.")
+    input_path, output_dir = resolve_io_paths(config, "minhash", "clean")
+    
+    # Validate input path
+    validate_input_path(input_path, "minhash")
 
     ds = rd.read_parquet(str(input_path.absolute()))
 
@@ -73,16 +70,13 @@ def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     batch_size = config.batch_size
 
     ds_sig = ds.map_batches(
-        MinHashCompute,  # pyright: ignore[reportArgumentType]
+        MinHashCompute,
         batch_size=batch_size,
-        compute=rd.ActorPoolStrategy(size=concurrency),  # pyright: ignore[reportArgumentType]
+        compute=ActorPoolStrategy(size=concurrency),
     )
 
     out_path = output_dir / "minhash_parquet"
-    out_path.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"Writing minhash results to {out_path}...")
-    ds_sig.write_parquet(str(out_path.absolute()))
+    write_parquet(ds_sig, out_path, logger)
 
     count = ds_sig.count()
     logger.info(f"Computed minhash for {count} docs.")

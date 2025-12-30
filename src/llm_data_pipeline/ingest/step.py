@@ -7,7 +7,7 @@ import gzip
 import hashlib
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any
 
 from warcio.archiveiterator import ArchiveIterator
 
@@ -38,7 +38,7 @@ def _doc_id(source_path: str, url: str, warc_date: str, record_id: str) -> str:
     return hashlib.sha1(raw).hexdigest()
 
 
-def extract_wet_gz_file(path: Path, cfg: IngestConfig) -> List[Dict[str, Any]]:
+def extract_wet_gz_file(path: Path, cfg: IngestConfig) -> list[dict[str, Any]]:
     """
     将一个 *.wet.gz 文件解析为多条标准化文档记录。
 
@@ -54,7 +54,7 @@ def extract_wet_gz_file(path: Path, cfg: IngestConfig) -> List[Dict[str, Any]]:
         - source_path: 原始文件路径
         - text: 经过轻量规范化与长度裁剪的正文
     """
-    docs: List[Dict[str, Any]] = []
+    docs: list[dict[str, Any]] = []
     n = 0
 
     with path.open("rb") as f:

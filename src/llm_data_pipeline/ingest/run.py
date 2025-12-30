@@ -4,23 +4,24 @@
 """
 
 import argparse
-import logging
 from pathlib import Path
 
 import ray.data as rd
+from ray.data import ActorPoolStrategy
 
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
+    write_parquet,
 )
 from llm_data_pipeline.ingest.step import IngestConfig, extract_wet_gz_file
-
-logger = logging.getLogger(__name__)
 
 
 def discover_files(data_dir: Path, pattern: str) -> list[Path]:
     """按模式枚举数据目录下的文件，过滤隐藏文件"""
+    logger = PipelineLogger.get()
     if not data_dir.exists():
         logger.warning(f"Data dir {data_dir} does not exist.")
         return []
@@ -42,6 +43,8 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point"""
+    logger = PipelineLogger.get()
+    
     # map args
     data_dir = Path(kwargs.get("data_dir", "./data/commoncrawl/"))
     pattern = kwargs.get("pattern", "**/*.wet.gz")
@@ -62,9 +65,9 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
         files = files[:max_files]
 
     cfg = IngestConfig(
-        min_text_chars=getattr(config, "min_text_chars", kwargs.get("min_text_chars", 200)),
-        max_text_chars=getattr(config, "max_text_chars", kwargs.get("max_text_chars", 200_000)),
-        max_docs_per_file=getattr(config, "max_docs_per_file", kwargs.get("max_docs_per_file", 0)),
+        min_text_chars=kwargs.get("min_text_chars", 200),
+        max_text_chars=kwargs.get("max_text_chars", 200_000),
+        max_docs_per_file=kwargs.get("max_docs_per_file", 0),
     )
 
     if not files:
@@ -74,7 +77,7 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     # dataset from items
     ds_files = rd.from_items([{"path": str(p.absolute())} for p in files])
 
-    compute = rd.ActorPoolStrategy(size=taskpool_size) if taskpool_size else None
+    compute = ActorPoolStrategy(size=taskpool_size) if taskpool_size else None
 
     ds_docs = ds_files.flat_map(
         lambda r: extract_wet_gz_file(Path(r["path"]), cfg),
@@ -86,9 +89,7 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
         logger.info(f"DEBUG: Limiting ingest to {limit} records.")
         ds_docs = ds_docs.limit(limit)
 
-    output_path.mkdir(parents=True, exist_ok=True)
-    logger.info(f"Writing ingest result to {output_path}...")
-    ds_docs.write_parquet(str(output_path.absolute()))
+    write_parquet(ds_docs, output_path, logger)
 
     doc_count = ds_docs.count()
     logger.info(f"files = {len(files)}")

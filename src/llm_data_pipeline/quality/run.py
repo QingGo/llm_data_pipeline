@@ -1,23 +1,22 @@
 import argparse
-import logging
 import os
-from pathlib import Path
 
-import ray
 import ray.data as rd
+from ray.data import ActorPoolStrategy
 
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
+    validate_input_path,
+    validate_model_path,
+    write_parquet,
 )
 from llm_data_pipeline.quality.model import LanguageFilter
 
-logger = logging.getLogger(__name__)
-
 
 def add_args(p: argparse.ArgumentParser):
-    p.add_argument("--input", default=None, help="Input path")
     p.add_argument("--model-path", default="./models/lid.176.bin", help="Path to fasttext LID model")
     p.add_argument("--langs", default="zh,en", help="Comma separated languages to keep")
     p.add_argument("--threshold", type=float, default=0.4, help="LID confidence threshold")
@@ -25,20 +24,17 @@ def add_args(p: argparse.ArgumentParser):
 
 def run_quality(config: PipelineConfig, **kwargs) -> dict:
     """Quality filtering step"""
-    manual_input = kwargs.get("input")
-    if manual_input:
-        input_path = Path(manual_input)
-        _, output_dir = resolve_io_paths(config, "quality")
-    else:
-        input_path, output_dir = resolve_io_paths(config, "quality", "deduped")
-
+    logger = PipelineLogger.get()
+    
+    # Resolve paths
+    input_path, output_dir = resolve_io_paths(config, "quality", "deduped")
+    
+    # Validate input path
+    validate_input_path(input_path, "quality")
+    
     # Model path
     model_path = getattr(config, "model_path", kwargs.get("model_path", "./models/lid.176.bin"))
-
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input path {input_path} does not exist for quality filter.")
-    if not os.path.exists(model_path):
-        raise RuntimeError(f"Model not found at {model_path}. Please download it first.")
+    validate_model_path(model_path, "quality")
 
     ds = rd.read_parquet(str(input_path.absolute()))
 
@@ -48,7 +44,7 @@ def run_quality(config: PipelineConfig, **kwargs) -> dict:
         ds = ds.limit(limit)
     logger.info(f"Reading {ds.count()} docs from {input_path}")
 
-    langs_str = getattr(config, "langs", kwargs.get("langs", "zh,en"))
+    langs_str = kwargs.get("langs", "zh,en")
     langs = langs_str.split(",")
     threshold = getattr(config, "threshold", kwargs.get("threshold", 0.4))
 
@@ -64,16 +60,16 @@ def run_quality(config: PipelineConfig, **kwargs) -> dict:
             row["lang_score"] = score
             return row
 
-    ds_scored = ds.map(QualityMapper, compute=ray.data.ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4))  # pyright: ignore[reportArgumentType]
+    ds_scored = ds.map(
+        QualityMapper, 
+        compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4)
+    )
 
     # Filter
     ds_kept = ds_scored.filter(lambda r: r["quality_keep"])
 
     out_dir = output_dir / "quality_parquet"
-    out_dir.mkdir(parents=True, exist_ok=True)
-
-    logger.info(f"Writing kept docs to {out_dir}...")
-    ds_kept.write_parquet(str(out_dir))
+    write_parquet(ds_kept, out_dir, logger)
 
     kept_count = ds_kept.count()
     orig_count = ds.count()

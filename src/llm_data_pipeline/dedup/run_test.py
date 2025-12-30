@@ -2,7 +2,7 @@
 
 import argparse
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any
 
 import ray
 import ray.data as rd
@@ -33,7 +33,7 @@ class MinHashMapper:
         self.num_perm = num_perm
         self.ngram = ngram
 
-    def __call__(self, row: Dict[str, Any]) -> Dict[str, Any]:
+    def __call__(self, row: dict[str, Any]) -> dict[str, Any]:
         text = row.get("text", "")
         # 如果 text 为 None 或非字符串，需做容错
         if not isinstance(text, str):

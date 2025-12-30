@@ -1,5 +1,4 @@
 import argparse
-import logging
 from pathlib import Path
 
 import numpy as np
@@ -7,11 +6,11 @@ import pyarrow.parquet as pq
 
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
+    validate_input_path,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def add_args(p: argparse.ArgumentParser):
@@ -22,26 +21,29 @@ def add_args(p: argparse.ArgumentParser):
 
 def run_export(config: PipelineConfig, **kwargs) -> dict:
     """Export to binary step"""
-    manual_input = kwargs.get("input_dir")
+    logger = PipelineLogger.get()
     base_calc_out = config.output_base
 
-    if manual_input:
-        input_dir = Path(manual_input)
+    # Resolve input directory
+    input_dir = kwargs.get("input_dir")
+    if input_dir:
+        input_dir = Path(input_dir)
     else:
         # resolve usually returns (input_dir, output_root)
         i_path, _ = resolve_io_paths(config, "export", "token_packing")
         input_dir = i_path
 
-    manual_output = kwargs.get("output_file")
-    if manual_output:
-        output_file = Path(manual_output)
+    # Resolve output file
+    output_file = kwargs.get("output_file")
+    if output_file:
+        output_file = Path(output_file)
     else:
         output_file = base_calc_out / "final.bin"
 
     dtype_str = kwargs.get("dtype", "uint16")
 
-    if not input_dir.exists():
-        raise FileNotFoundError(f"Input dir {input_dir} does not exist for export.")
+    # Validate input path
+    validate_input_path(input_dir, "export")
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
 

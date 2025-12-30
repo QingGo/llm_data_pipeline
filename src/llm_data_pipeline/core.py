@@ -1,11 +1,15 @@
 import argparse
 import logging
+import os
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import ray
+import ray.data as rd
 
 
 @dataclass
@@ -19,6 +23,10 @@ class PipelineConfig:
     batch_size: int = 4096
     concurrency: int | None = None
     resume_from: str | None = None
+    # Additional common config options
+    model_path: str | None = None
+    input: str | None = None
+    threshold: float | None = None
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
@@ -31,7 +39,28 @@ class PipelineConfig:
             batch_size=int(getattr(args, "batch_size", 4096)),
             concurrency=getattr(args, "concurrency", None),
             resume_from=getattr(args, "resume_from", None),
+            model_path=getattr(args, "model_path", None),
+            input=getattr(args, "input", None),
+            threshold=getattr(args, "threshold", None),
         )
+
+
+class PipelineLogger:
+    """Singleton logger for the pipeline."""
+
+    _instance: logging.Logger | None = None
+
+    @classmethod
+    def get(cls) -> logging.Logger:
+        """Gets the singleton logger instance."""
+        if cls._instance is None:
+            raise RuntimeError("Logger not initialized. Call setup_logging first.")
+        return cls._instance
+
+    @classmethod
+    def set(cls, logger: logging.Logger) -> None:
+        """Sets the singleton logger instance."""
+        cls._instance = logger
 
 
 def setup_logging(output_dir: Path, step_name: str = "Pipeline") -> logging.Logger:
@@ -73,6 +102,7 @@ def setup_logging(output_dir: Path, step_name: str = "Pipeline") -> logging.Logg
     logger.propagate = True  # Propagate to Root (File)
 
     logger.info(f"Logging to {log_file}")
+    PipelineLogger.set(logger)
     return logger
 
 
@@ -135,6 +165,7 @@ def get_arg_parser(description: str) -> argparse.ArgumentParser:
     p.add_argument("--limit", type=int, default=0, help="Debug: limit total records (0=no limit)")
     p.add_argument("--batch-size", type=int, default=4096, help="Batch size for Ray Data")
     p.add_argument("--concurrency", type=int, default=None, help="Concurrency (None=auto)")
+    p.add_argument("--input", default=None, help="Input directory (default: <output_base>/<previous_step>_parquet)")
     return p
 
 
@@ -145,6 +176,10 @@ def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: st
     """
     base = config.output_base
     output_dir = base
+
+    # Check if input is provided via config
+    if hasattr(config, "input") and config.input:
+        return Path(config.input), output_dir
 
     # Input comes from previous step's parquet folder usually
     if input_step_name:
@@ -160,10 +195,58 @@ def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: st
     return input_path, output_dir
 
 
+def read_parquet(input_path: Path, config: PipelineConfig) -> rd.Dataset:
+    """
+    Reads parquet files from the input path and applies limit if specified.
+    """
+    logger = PipelineLogger.get()
+    logger.info(f"Reading parquet from {input_path}")
+    ds = rd.read_parquet(str(input_path.absolute()))
+
+    if config.limit > 0:
+        logger.info(f"DEBUG: Limiting input to {config.limit} records.")
+        ds = ds.limit(config.limit)
+
+    return ds
+
+
+def write_parquet(ds: rd.Dataset, output_path: Path, logger: logging.Logger) -> None:
+    """
+    Writes a Ray Dataset to parquet files.
+    """
+    output_path.mkdir(parents=True, exist_ok=True)
+    logger.info(f"Writing results to {output_path}...")
+    ds.write_parquet(str(output_path.absolute()))
+
+
+def run_step(
+    step_name: str,
+    func: Callable,
+    config: PipelineConfig,
+    logger: logging.Logger,
+    extra_args: dict[str, Any] | None = None
+) -> dict[str, Any]:
+    """
+    Runs a pipeline step with logging and error handling.
+    """
+    logger.info(f"=== Starting Step: {step_name} ===")
+    start_time = time.time()
+    try:
+        stats = func(config, **(extra_args or {}))
+
+        duration = time.time() - start_time
+        logger.info(f"=== Finished Step: {step_name} in {time.strftime('%H:%M:%S', time.gmtime(duration))} ===")
+        logger.info(f"Stats: {stats}")
+        return stats
+    except Exception as e:
+        logger.error(f"Step {step_name} failed: {e}", exc_info=True)
+        raise
+
+
 def run_step_entrypoint(
     description: str,
-    run_func,
-    add_args_func=None,
+    run_func: Callable,
+    add_args_func: Callable | None = None,
     step_name: str | None = None,
     use_ray: bool = True,
 ) -> None:
@@ -196,3 +279,20 @@ def run_step_entrypoint(
     except Exception as e:
         logger.error(f"Step {step_name} failed: {e}", exc_info=True)
         sys.exit(1)
+
+
+def validate_input_path(input_path: Path, step_name: str) -> None:
+    """
+    Validates that the input path exists.
+    """
+    if not input_path.exists():
+        raise FileNotFoundError(f"Input path {input_path} does not exist for {step_name} step.")
+
+
+def validate_model_path(model_path: str | Path, step_name: str) -> None:
+    """
+    Validates that the model path exists.
+    """
+    if not os.path.exists(model_path):
+        raise RuntimeError(f"Model not found at {model_path} for {step_name} step. Please download it first.")
+
