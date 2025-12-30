@@ -1,5 +1,4 @@
 from dataclasses import dataclass
-from typing import List, Optional
 
 import fasttext
 import fasttext.FastText
@@ -42,13 +41,13 @@ fasttext.FastText._FastText.predict = _patched_predict
 class QualityFilter:
     model_path: str
     threshold: float = 0.5
-    pos_label: Optional[str] = None  # 先跑一次打印 labels 再填
+    pos_label: str | None = None  # 先跑一次打印 labels 再填
 
     def __post_init__(self) -> None:
         print(f"Loading fastText model: {self.model_path}")
         self.model = fasttext.load_model(self.model_path)
 
-        self.all_labels: List[str] = list(map(str, self.model.get_labels()))
+        self.all_labels: list[str] = list(map(str, self.model.get_labels()))
         if not self.all_labels:
             raise RuntimeError("No labels found in the model.")
         print("Model labels:", self.model.get_labels())
@@ -81,8 +80,8 @@ class QualityFilter:
     def keep(self, text: str) -> bool:
         return self.score(text) >= self.threshold
 
-    def filter_batch(self, texts: List[str]) -> List[str]:
-        kept: List[str] = []
+    def filter_batch(self, texts: list[str]) -> list[str]:
+        kept: list[str] = []
         for t in texts:
             if self.keep(t):
                 kept.append(t)
@@ -121,3 +120,43 @@ if __name__ == "__main__":
         s = qf.score(text)
         status = "✅ 保留" if s >= qf.threshold else "❌ 丢弃"
         print(f"{status} | score={s:.4f} | {text[:80]}...")
+
+
+@dataclass
+class LanguageFilter:
+    model_path: str
+    allowed_langs: list[str]  # e.g. ["zh", "en"] (automatic prefix handling)
+    threshold: float = 0.4
+
+    def __post_init__(self) -> None:
+        print(f"Loading fastText LID model: {self.model_path}")
+        self.model = fasttext.load_model(self.model_path)
+        # Normalize allowed langs to fasttext label format
+        self.allowed_labels = set()
+        for lang in self.allowed_langs:
+            if not lang.startswith("__label__"):
+                lang = f"__label__{lang}"
+            self.allowed_labels.add(lang)
+        print(f"Allowed labels: {self.allowed_labels}")
+
+    @staticmethod
+    def normalize(text: str) -> str:
+        return " ".join(text.split())
+
+    def predict(self, text: str) -> tuple[str, float]:
+        text = self.normalize(text)
+        if not text:
+            return ("__label__unknown", 0.0)
+
+        # predict returns tuple of lists: (['__label__en'], [0.98])
+        labels, probs = self.model.predict(text, k=1)
+        if not labels:
+            return ("__label__unknown", 0.0)
+        return labels[0], float(probs[0])
+
+    def keep(self, text: str) -> tuple[bool, str, float]:
+        """Returns (keep, lang_label, score)"""
+        label, score = self.predict(text)
+        if label in self.allowed_labels and score >= self.threshold:
+            return True, label, score
+        return False, label, score
