@@ -1,11 +1,14 @@
 import hashlib
 import itertools
+import logging
 from typing import Any
 
 import ray
 import ray.data as rd
 
 from llm_data_pipeline.dedup.minhash import char_ngrams, datasketch_minhash
+
+logger = logging.getLogger(__name__)
 
 
 # ---------- LSH banding (Map) ----------
@@ -124,7 +127,7 @@ def ray_global_dedup(
 
     # 每个分量选 canonical，生成删除集合
     keep = set()
-    for root, members in comp.items():
+    for _, members in comp.items():
         keep.add(pick_canonical(members))
 
     kept_docs = len(keep)
@@ -174,10 +177,11 @@ if __name__ == "__main__":
     result = ray_global_dedup(ds, rows_per_band=4)
 
     # 5. 打印结果
-    print("\n=== Dedup Result ===")
-    print(f"Total docs: {result['total_docs']}")
-    print(f"Kept docs: {result['kept_docs']}")
-    print(f"Removed docs: {result['removed_docs']}")
-    print(f"Dedup rate: {result['dedup_rate']:.2%}")
-    print(f"Duplicate pairs sample: {result['duplicate_pairs_sample']}")
-    print(f"Keep set size: {len(result['keep_set'])}")
+    # 5. 打印结果
+    logger.info("=== Dedup Result ===")
+    logger.info(f"Total docs: {result['total_docs']}")
+    logger.info(f"Kept docs: {result['kept_docs']}")
+    logger.info(f"Removed docs: {result['removed_docs']}")
+    logger.info(f"Dedup rate: {result['dedup_rate']:.2%}")
+    logger.info(f"Duplicate pairs sample: {result['duplicate_pairs_sample']}")
+    logger.info(f"Keep set size: {len(result['keep_set'])}")

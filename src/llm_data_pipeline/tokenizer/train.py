@@ -1,10 +1,19 @@
 import argparse
+import logging
 from pathlib import Path
 
 import ray
 import ray.data as rd
 import sentencepiece as spm
 from transformers import AutoTokenizer
+
+from llm_data_pipeline.core import (
+    PipelineConfig,
+    resolve_io_paths,
+    run_step_entrypoint,
+)
+
+logger = logging.getLogger(__name__)
 
 
 def write_shards_with_ray(
@@ -24,8 +33,10 @@ def write_shards_with_ray(
 
     ds = ds.select_columns(["text"]).filter(lambda r: r["text"] is not None and str(r["text"]).strip() != "")
 
+    ds = ds.select_columns(["text"]).filter(lambda r: r["text"] is not None and str(r["text"]).strip() != "")
+
     if limit > 0:
-        print(f"DEBUG: Limiting tokenizer training input to {limit} records.")
+        logger.info(f"DEBUG: Limiting tokenizer training input to {limit} records.")
         ds = ds.limit(limit)
 
     if max_chars > 0:
@@ -129,30 +140,40 @@ def compare_token_lengths(spm_model_path: Path, text: str):
     }
 
 
-def run_train_tokenizer(args) -> dict:
+def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
     """Train tokenizer step"""
-    base_out = getattr(args, "output_dir", "./outputs/dev")
-    input_path = Path(getattr(args, "parquet_dir", f"{base_out}/quality_parquet"))
-    # In shell script: --work_dir outputs/dev/tokenizers/working
-    # --model_prefix outputs/dev/tokenizers/my_spm
+    input_path_base, output_dir_base = resolve_io_paths(config, "train_tokenizer", "quality")
+
+    def get_arg(name, default=None):
+        return kwargs.get(name, default)
+
+    # Path resolution
+    parquet_dir_arg = get_arg("parquet_dir")
+    if parquet_dir_arg:
+        input_path = Path(parquet_dir_arg)
+    elif input_path_base:
+        # resolve_io_paths returns folder
+        input_path = input_path_base
+    else:
+        input_path = output_dir_base / "quality_parquet"
 
     # We defaults based on base_out if not set
-    work_dir = Path(getattr(args, "work_dir", f"{base_out}/tokenizers/working"))
-    model_prefix = Path(getattr(args, "model_prefix", f"{base_out}/tokenizers/my_spm"))
+    work_dir = Path(get_arg("work_dir", output_dir_base / "tokenizers/working"))
+    model_prefix = Path(get_arg("model_prefix", output_dir_base / "tokenizers/my_spm"))
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input path {input_path} does not exist for training tokenizer.")
 
     shard_dir = work_dir / "corpus_txt"
 
-    num_shards = getattr(args, "num_shards", 256)
-    max_chars = getattr(args, "max_chars", 5000)
-    vocab_size = getattr(args, "vocab_size", 32000)
-    input_sentence_size = getattr(args, "input_sentence_size", 5_000_000)
-    model_type = getattr(args, "model_type", "bpe")
-    character_coverage = getattr(args, "character_coverage", 0.9995)
-    sample_text = getattr(
-        args, "sample_text", "我希望用同一段中文，比较自定义 tokenizer 与 Llama 3 tokenizer 的编码长度，并计算压缩率。"
+    num_shards = int(get_arg("num_shards", 256))
+    max_chars = int(get_arg("max_chars", 5000))
+    vocab_size = int(get_arg("vocab_size", 32000))
+    input_sentence_size = int(get_arg("input_sentence_size", 5_000_000))
+    model_type = get_arg("model_type", "bpe")
+    character_coverage = float(get_arg("character_coverage", 0.9995))
+    sample_text = get_arg(
+        "sample_text", "我希望用同一段中文，比较自定义 tokenizer 与 Llama 3 tokenizer 的编码长度，并计算压缩率。"
     )
 
     print("Step 1) Write text shards from parquet...")
@@ -161,11 +182,11 @@ def run_train_tokenizer(args) -> dict:
         out_dir=shard_dir,
         num_shards=num_shards,
         max_chars=max_chars,
-        limit=getattr(args, "limit", 0),
+        limit=int(get_arg("limit", 0)),
     )
-    print(f"  wrote {len(txt_paths)} shard files into {shard_dir}")
+    logger.info(f"  wrote {len(txt_paths)} shard files into {shard_dir}")
 
-    print("\nStep 2) Train SentencePiece...")
+    logger.info("Step 2) Train SentencePiece...")
     train_sentencepiece_py(
         input_txt_paths=txt_paths,
         model_prefix=model_prefix,
@@ -176,7 +197,7 @@ def run_train_tokenizer(args) -> dict:
     )
 
     spm_model_path = Path(str(model_prefix) + ".model")
-    print("\nStep 3) Compare token lengths...")
+    logger.info("Step 3) Compare token lengths...")
     stats = compare_token_lengths(
         spm_model_path=spm_model_path,
         text=sample_text,
@@ -186,14 +207,13 @@ def run_train_tokenizer(args) -> dict:
     return stats
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--parquet_dir", type=str, default="./outputs/dev/cleaned_parquet")
-    ap.add_argument("--work_dir", type=str, default="./outputs/dev/tokenizers/spm32k_work")
+def add_args(ap: argparse.ArgumentParser):
+    ap.add_argument("--parquet_dir", type=str, default=None)
+    ap.add_argument("--work_dir", type=str, default=None)
     ap.add_argument(
         "--model_prefix",
         type=str,
-        default="./outputs/dev/tokenizers/spm32k/spm_32k",
+        default=None,
     )
     ap.add_argument("--vocab_size", type=int, default=32000)
     ap.add_argument("--num_shards", type=int, default=256)
@@ -211,8 +231,12 @@ def main():
         type=str,
         default="我希望用同一段中文，比较自定义 tokenizer 与 Llama 3 tokenizer 的编码长度，并计算压缩率。",
     )
-    args = ap.parse_args()
 
-    # Note: main uses specific defaults, pipeline might override.
-    ray.init(ignore_reinit_error=True)
-    run_train_tokenizer(args)
+
+def main():
+    run_step_entrypoint(
+        description="Tokenizer Training",
+        run_func=run_train_tokenizer,
+        add_args_func=add_args,
+        step_name="TrainTokenizer",
+    )

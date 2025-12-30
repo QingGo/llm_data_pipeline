@@ -1,7 +1,6 @@
 """清洗步骤：对抽取得到的文档文本进行规则化清洗与打分"""
 
 from dataclasses import dataclass
-from typing import Tuple
 
 import ray.data as rd
 
@@ -18,13 +17,15 @@ class CleanConfig:
 
 def clean_dataset(
     ds: rd.Dataset, cfg: CleanConfig, taskpool_size: int = 0, num_cpus: float = 1.0
-) -> Tuple[rd.Dataset, rd.Dataset]:
+) -> tuple[rd.Dataset, rd.Dataset]:
     """对输入 Dataset 批处理清洗并返回保留与丢弃的两个子集
 
     输入：ingest 输出的 Dataset（含 doc_id/url/warc_date/source_path/text）
     输出：`(kept_ds, dropped_ds)` 两个 Dataset
     """
-    compute = rd.TaskPoolStrategy(size=taskpool_size) if taskpool_size else None
+    # map_batches default compute is "tasks"
+    # we use concurrency to control parallelism if taskpool_size is set
+    concurrency = taskpool_size if taskpool_size > 0 else None
 
     def clean_batch(df):
         """单批次清洗逻辑，返回包含清洗结果与度量的 DataFrame"""
@@ -59,7 +60,7 @@ def clean_dataset(
         clean_batch,
         batch_format="pandas",
         batch_size=cfg.batch_size,
-        compute=compute,
+        concurrency=concurrency,
         num_cpus=num_cpus,
     )
 

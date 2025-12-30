@@ -1,6 +1,7 @@
 import argparse
 import glob
 import json
+import logging
 import os
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -10,9 +11,21 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 from datasets import load_dataset
 
-# -----------------------------
-# SentencePiece loader (per-process lazy init)
-# -----------------------------
+from llm_data_pipeline.core import (
+    PipelineConfig,
+    resolve_io_paths,
+    run_step_entrypoint,
+)
+
+logger = logging.getLogger(__name__)
+
+logger = logging.getLogger(__name__)
+
+
+# ... (inside run_tokenize)
+# ...
+
+
 _SP = None
 
 
@@ -237,71 +250,52 @@ def write_parquet_shard(
 # -----------------------------
 # Pipeline
 # -----------------------------
-def run_tokenize(args) -> dict:
+def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     """Tokenize and pack step"""
-    base_out = getattr(args, "output_dir", "./outputs/dev")
-    input_dir = getattr(args, "input_dir", f"{base_out}/quality_parquet")
-    output_dir = getattr(
-        args, "output_dir_packing", f"{base_out}/token_packing_parquet"
-    )  # Note: output_dir arg conflicts with base_out in pipeline if we aren't careful.
-    # In pipeline loop, args.output_dir is set to base_out.
-    # But this module interprets output_dir as the specific output folder.
-    # We should prefer specific args if set, else construct from base.
 
-    # Correction: The args object passed in might have "output_dir" set to "outputs/dev".
-    # But tokenizer/run.py expects "output_dir" to be the actual destination.
-    # We need to distinguish.
+    # Helper to resolve generic args
+    def get_arg(name, default=None):
+        return kwargs.get(name, default)
 
-    # If called from CLI, output_dir is destination.
-    # If called from pipeline, args.output_dir is base.
-    # Let's check if "output_dir" looks like a base or explicit.
-    # Ideally pipeline should set a different attr or we check.
-
-    # To be safe, if output_dir ends with "token_packing_parquet", use it.
-    # Else construct it.
-
-    # But wait, args is a Namespace.
-    # I will modify pipeline to NOT overwrite output_dir if possible or use a different key.
-    # Or checking here:
-
-    potential_out = getattr(args, "output_dir", None)
-    if potential_out and str(potential_out).endswith("token_packing_parquet"):
-        out_path = str(potential_out)
+    # Path resolution
+    manual_input = get_arg("input_dir")
+    if manual_input:
+        in_path = str(manual_input)
     else:
-        base = potential_out if potential_out else "./outputs/dev"
-        out_path = os.path.join(base, "token_packing_parquet")
+        # We rely on resolve logic + standard naming
+        input_path, _ = resolve_io_paths(config, "tokenize", "quality")
+        in_path = str(input_path)
 
-    # input_dir default also needs care
-    potential_in = getattr(args, "input_dir", None)
-    if potential_in:
-        in_path = str(potential_in)
+    output_dir_base = config.output_base
+    manual_output = get_arg("output_dir")
+    if manual_output:
+        out_path = str(manual_output)
     else:
-        # Default input for tokenize is quality_parquet
-        base = getattr(args, "output_dir", "./outputs/dev")
-        in_path = os.path.join(base, "quality_parquet")
+        # Default
+        out_path = str(output_dir_base / "token_packing_parquet")
 
-    spm_model = getattr(args, "spm_model", os.path.join(base_out, "tokenizers/spm32k/spm_32k.model"))
+    spm_model_path = str(get_arg("spm_model", output_dir_base / "tokenizers/spm32k/spm_32k.model"))
 
     os.makedirs(out_path, exist_ok=True)
 
     # args mapping
-    text_col = getattr(args, "text_col", "text")
-    seq_len = getattr(args, "seq_len", 4096)
-    num_proc = getattr(args, "num_proc", max(1, os.cpu_count() // 2))
-    batch_size = getattr(args, "batch_size", 512)
-    writer_batch_size = getattr(args, "writer_batch_size", 4096)
-    shard_chunks = getattr(args, "shard_chunks", 2048)
-    compression = getattr(args, "compression", "zstd")
+    text_col = get_arg("text_col", "text")
+    seq_len = int(get_arg("seq_len", 4096))
+    num_proc = int(get_arg("num_proc", max(1, (os.cpu_count() or 1) // 2)))
+    batch_size = int(get_arg("batch_size", 512))
+    writer_batch_size = int(get_arg("writer_batch_size", 4096))
+    shard_chunks = int(get_arg("shard_chunks", 2048))
+    compression = get_arg("compression", "zstd")
 
-    add_eos = getattr(args, "add_eos", True)
-    ensure_eos = getattr(args, "ensure_eos", True)
-    drop_remainder = getattr(args, "drop_remainder", True)
-    emit_seq_id = getattr(args, "emit_seq_id", False)
-    emit_seq_lens_offsets = getattr(args, "emit_seq_lens_offsets", False)
+    add_eos = bool(get_arg("add_eos", True))
+    ensure_eos = bool(get_arg("ensure_eos", True))
+    drop_remainder = bool(get_arg("drop_remainder", True))
+    emit_seq_id = bool(get_arg("emit_seq_id", False))
+    emit_seq_lens_offsets = bool(get_arg("emit_seq_lens_offsets", False))
 
     parquet_files = sorted(glob.glob(os.path.join(in_path, "*.parquet")))
     if not parquet_files:
-        print(f"No parquet files found under: {in_path}")
+        logger.warning(f"No parquet files found under: {in_path}")
         return {"status": "skipped", "reason": "no_input_files"}
 
     # 1) Load parquet dataset (HF datasets)
@@ -313,13 +307,13 @@ def run_tokenize(args) -> dict:
     if text_col not in ds.column_names:
         raise KeyError(f"Column '{text_col}' not found. Available: {ds.column_names}")
 
-    limit = getattr(args, "limit", 0)
+    limit = int(getattr(config, "limit", 0))
     if limit > 0 and len(ds) > limit:
-        print(f"DEBUG: Limiting tokenization input to {limit} records.")
+        logger.info(f"DEBUG: Limiting tokenization input to {limit} records.")
         ds = ds.select(range(limit))
 
     # 2) Tokenize with datasets.map(num_proc=N)
-    spm_model_path = spm_model
+    # Check spm model
     if not os.path.exists(spm_model_path):
         raise FileNotFoundError(f"SPM model not found at {spm_model_path}")
 
@@ -413,23 +407,33 @@ def run_tokenize(args) -> dict:
     with open(os.path.join(out_path, "packing_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    print(f"[OK] Wrote {total_chunks} packed chunks to: {out_path}")
-    print(f"[Meta] {os.path.join(out_path, 'packing_meta.json')}")
+    logger.info(f"[OK] Wrote {total_chunks} packed chunks to: {out_path}")
+    logger.info(f"[Meta] {os.path.join(out_path, 'packing_meta.json')}")
 
     return meta
 
 
-def main() -> None:
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--spm_model", type=str, default="outputs/dev/tokenizers/spm32k/spm_32k.model")
-    ap.add_argument("--input_dir", type=str, default="outputs/dev/cleaned_parquet")
-    ap.add_argument("--output_dir", type=str, default="outputs/dev/token_packing_parquet")
+def add_args(ap: argparse.ArgumentParser):
+    # Note: Base args like --output-base are added by core.
+    # We add overrides or specific args.
+    ap.add_argument("--spm_model", type=str, default=None, help="Path to SPM model")
+    ap.add_argument("--input_dir", type=str, default=None, help="Input directory")
+    ap.add_argument(
+        "--output_dir", type=str, default=None, help="Specific output directory (override base + convention)"
+    )
 
     ap.add_argument("--text_col", type=str, default="text")
     ap.add_argument("--seq_len", type=int, default=4096)
-    ap.add_argument("--num_proc", type=int, default=max(1, os.cpu_count() // 2))  # pyright: ignore[reportOptionalOperand]
+    ap.add_argument("--num_proc", type=int, default=max(1, (os.cpu_count() or 1) // 2))
 
-    ap.add_argument("--batch_size", type=int, default=512, help="datasets.map batch size")
+    # Conflict with core's batch-size (4096), but here default is 512.
+    # We will let core parse --batch-size. If user provides it, it applies here.
+    # If not, core default (4096) applies unless we ignore it and use our own default.
+    # But get_arg("batch_size", 512) will prefer config/args value.
+    # If core parser sets default to 4096, args.batch_size will be 4096.
+    # So to get 512 default, we might need a separate arg or just accept 4096 is likely fine/better?
+    # Actually for HF datasets map, 4096 is also fine.
+
     ap.add_argument("--writer_batch_size", type=int, default=4096, help="datasets.map writer_batch_size")
     ap.add_argument("--shard_chunks", type=int, default=2048, help="packed chunks per output parquet shard")
 
@@ -441,7 +445,6 @@ def main() -> None:
     ap.add_argument("--drop_remainder", action="store_true", default=True)
     ap.add_argument("--keep_remainder", action="store_false", dest="drop_remainder")
 
-    # Independent-sample packing metadata (for block-diagonal attention)
     ap.add_argument(
         "--emit_seq_id",
         action="store_true",
@@ -456,9 +459,15 @@ def main() -> None:
     )
 
     ap.add_argument("--compression", type=str, default="zstd", choices=["zstd", "snappy", "gzip", "brotli", "none"])
-    args = ap.parse_args()
 
-    run_tokenize(args)
+
+def main() -> None:
+    run_step_entrypoint(
+        description="Tokenizer and Packer",
+        run_func=run_tokenize,
+        add_args_func=add_args,
+        use_ray=False,
+    )
 
 
 """

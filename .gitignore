@@ -17,4 +17,3 @@ data
 models/*
 llama3_tokenizer/
 *.log
-.agent

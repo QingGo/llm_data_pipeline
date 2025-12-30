@@ -3,6 +3,7 @@ import random
 import re
 from collections.abc import Iterable, Sequence
 
+import numpy as np
 from datasketch import MinHash
 
 # --------- 1) normalize + shingling ---------
@@ -67,7 +68,7 @@ def minhash_signature(shingles: Iterable[bytes], k: int = 128, seed: int = 42) -
 
 def minhash_jaccard_estimate(sig1: Sequence[int], sig2: Sequence[int]) -> float:
     assert len(sig1) == len(sig2)
-    eq = sum(1 for a, b in zip(sig1, sig2) if a == b)
+    eq = sum(1 for a, b in zip(sig1, sig2, strict=True) if a == b)
     return eq / len(sig1)
 
 
@@ -79,8 +80,6 @@ def datasketch_minhash(shingles: Iterable[bytes], k: int = 128) -> MinHash:
 
 
 # --------- 4) Vectorized MinHash (NumPy) ---------
-
-import numpy as np
 
 
 class VectorizedMinHash:
@@ -115,7 +114,7 @@ class VectorizedMinHash:
         shingles_set = char_ngrams(text, n=5)
         if not shingles_set:
             # Empty text case
-            return [np.uint64(0)] * self.k
+            return [0] * self.k
 
         # 1. Provide stable hash for each shingle
         # map bytes -> u64

@@ -4,67 +4,72 @@
 """
 
 import argparse
-import os
+import logging
 from pathlib import Path
 
-import ray
 import ray.data as rd
 
+from llm_data_pipeline.core import (
+    PipelineConfig,
+    resolve_io_paths,
+    run_step_entrypoint,
+)
 from llm_data_pipeline.ingest.step import IngestConfig, extract_wet_gz_file
+
+logger = logging.getLogger(__name__)
 
 
 def discover_files(data_dir: Path, pattern: str) -> list[Path]:
     """按模式枚举数据目录下的文件，过滤隐藏文件"""
+    if not data_dir.exists():
+        logger.warning(f"Data dir {data_dir} does not exist.")
+        return []
+
     files = sorted(data_dir.glob(pattern))
     return list(filter(lambda p: not p.name.startswith("."), files))
 
 
-def parse_args() -> argparse.Namespace:
-    """解析命令行参数"""
-    p = argparse.ArgumentParser("llm_data_pipeline.ingest.run (CommonCrawl WET.gz)")
+def add_args(p: argparse.ArgumentParser) -> None:
+    """添加 Ingest 特有参数"""
     p.add_argument("--data-dir", default="./data/commoncrawl/")
     p.add_argument("--pattern", default="**/*.wet.gz")
-    p.add_argument("--output", default="./outputs/dev/ingest_parquet", help="e.g. outputs/dev/ingest_parquet")
-    p.add_argument("--max-files", type=int, default=1, help="0=all (debug 可设 1~5)")
-    p.add_argument("--ray-address", default=None, help='e.g. "auto" for cluster, default local')
     p.add_argument("--taskpool-size", type=int, default=0, help="0=auto")
     p.add_argument("--num-cpus", type=float, default=1.0, help="cpus per task")
     p.add_argument("--min-text-chars", type=int, default=200)
     p.add_argument("--max-text-chars", type=int, default=200_000)
     p.add_argument("--max-docs-per-file", type=int, default=0)
-    return p.parse_args()
 
 
-def run_ingest(args) -> dict:
+def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point"""
     # map args
-    data_dir = Path(getattr(args, "data_dir", "./data/commoncrawl/"))
-    pattern = getattr(args, "pattern", "**/*.wet.gz")
+    data_dir = Path(kwargs.get("data_dir", "./data/commoncrawl/"))
+    pattern = kwargs.get("pattern", "**/*.wet.gz")
 
-    # Use output_dir from pipeline if available, else default
-    base_out = getattr(args, "output_dir", "./outputs/dev")
-    output_path = Path(base_out) / "ingest_parquet"
+    # Path resolution
+    _, output_base = resolve_io_paths(config, "ingest")
+    output_path = output_base / "ingest_parquet"
 
-    max_files = getattr(args, "max_files", 0)
-    taskpool_size = getattr(args, "taskpool_size", 0)
-    num_cpus = getattr(args, "num_cpus", 1.0)
+    max_files = config.max_files
+    limit = config.limit
 
-    # ray.init is handled by pipeline
+    # Ingest specific args
+    taskpool_size = kwargs.get("taskpool_size", 0)
+    num_cpus = kwargs.get("num_cpus", 1.0)
 
     files = discover_files(data_dir, pattern)
     if max_files and max_files > 0:
         files = files[:max_files]
 
-    limit = getattr(args, "limit", 0)
-    if limit > 0 and limit < len(files):
-        print(f"DEBUG: Pruning file list to {limit} files due to record limit.")
-        files = files[:limit]
-
     cfg = IngestConfig(
-        min_text_chars=getattr(args, "min_text_chars", 200),
-        max_text_chars=getattr(args, "max_text_chars", 200_000),
-        max_docs_per_file=getattr(args, "max_docs_per_file", 0),
+        min_text_chars=getattr(config, "min_text_chars", kwargs.get("min_text_chars", 200)),
+        max_text_chars=getattr(config, "max_text_chars", kwargs.get("max_text_chars", 200_000)),
+        max_docs_per_file=getattr(config, "max_docs_per_file", kwargs.get("max_docs_per_file", 0)),
     )
+
+    if not files:
+        logger.warning(f"No files found in {data_dir} with pattern {pattern}")
+        return {"files_processed": 0, "docs_ingested": 0, "output_path": str(output_path)}
 
     # dataset from items
     ds_files = rd.from_items([{"path": str(p.absolute())} for p in files])
@@ -77,41 +82,29 @@ def run_ingest(args) -> dict:
         num_cpus=num_cpus,
     )
 
-    limit = getattr(args, "limit", 0)
     if limit > 0:
-        print(f"DEBUG: Limiting ingest to {limit} records.")
+        logger.info(f"DEBUG: Limiting ingest to {limit} records.")
         ds_docs = ds_docs.limit(limit)
 
     output_path.mkdir(parents=True, exist_ok=True)
-    print(f"Writing ingest result to {output_path}...")
+    logger.info(f"Writing ingest result to {output_path}...")
     ds_docs.write_parquet(str(output_path.absolute()))
 
     doc_count = ds_docs.count()
-    print("files =", len(files))
-    print("docs_count =", doc_count)
+    logger.info(f"files = {len(files)}")
+    logger.info(f"docs_count = {doc_count}")
 
     return {"files_processed": len(files), "docs_ingested": doc_count, "output_path": str(output_path)}
 
 
 def main() -> None:
-    """Cli wrapper"""
-    args = parse_args()
-    # Standalone mode: init ray
-    venv_path = os.environ.get("VIRTUAL_ENV")
-    ray.init(
-        address=args.ray_address, object_store_memory=2 * 1024**3, runtime_env={"python": f"{venv_path}/bin/python"}
+    run_step_entrypoint(
+        description="llm_data_pipeline.ingest.run (CommonCrawl WET.gz)",
+        run_func=run_ingest,
+        add_args_func=add_args,
+        step_name="Ingest",
     )
-    # Map cli args to what run_ingest expects
-    # In standalone, args.output is explicit
-    # run_ingest expects output_dir to build output_dir/ingest_parquet
-    # We cheat a bit or adjust run_ingest.
-    # Let's adjust run_ingest to respect 'output' if passed, else derive.
 
-    # Actually, main() is rarely used now.
-    # Just setting output_dir -> output.parent if possible?
-    # run_ingest uses `output_dir` / `ingest_parquet`.
-    # default args.output is outputs/dev/ingest_parquet.
-    # so output_dir should be outputs/dev.
 
-    args.output_dir = str(Path(args.output).parent)
-    run_ingest(args)
+if __name__ == "__main__":
+    main()

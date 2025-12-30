@@ -1,10 +1,18 @@
 import argparse
+import logging
 import os
 from pathlib import Path
 
 import ray.data as rd
 
+from llm_data_pipeline.core import (
+    PipelineConfig,
+    resolve_io_paths,
+    run_step_entrypoint,
+)
 from llm_data_pipeline.dedup.minhash import VectorizedMinHash
+
+logger = logging.getLogger(__name__)
 
 
 class MinHashCompute:
@@ -24,75 +32,68 @@ class MinHashCompute:
             out_sigs.append(sig)
             out_lens.append(len(safe_text))
 
-        batch["minhash_sig"] = out_sigs
+        # [REFACTOR] Standardize column name to 'signature'
+        batch["signature"] = out_sigs
         batch["length"] = out_lens
         return batch
 
 
-def run_minhash(args) -> dict:
+def add_args(p: argparse.ArgumentParser) -> None:
+    p.add_argument("--input", default=None, help="Input directory")
+
+
+def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     """Computes MinHash signatures for dedup."""
-    base_out = getattr(args, "output_dir", "./outputs/dev")
-    input_path = Path(getattr(args, "input", f"{base_out}/cleaned_parquet"))
-    output_dir = Path(base_out)
+    # Resolve paths
+    manual_input = kwargs.get("input")
+    if manual_input:
+        input_path = Path(manual_input)
+        _, output_dir = resolve_io_paths(config, "minhash")
+    else:
+        input_path, output_dir = resolve_io_paths(config, "minhash", "clean")
 
     if not input_path.exists():
         raise FileNotFoundError(f"Input path {input_path} does not exist.")
 
     ds = rd.read_parquet(str(input_path.absolute()))
 
-    limit = getattr(args, "limit", 0)
+    limit = config.limit
     if limit > 0:
         ds = ds.limit(limit)
 
-    # Use map_batches with Class for stateful initialization (avoid pickling large arrays repeatedly)
-    # compute = MinHashCompute() # Ray handles class instantiation if passed as type?
-    # Actually for map_batches, we can pass the class directly and compute=ray.data.ActorPoolStrategy?
-    # Or just simple map_batches(MinHashCompute, compute=...)
-    # Ray data documentation says: map_batches(MyClass, batch_size=..., compute=...)
-
     # Determine concurrency
-    concurrency_arg = getattr(args, "concurrency", None)
-    if concurrency_arg:
-        concurrency = concurrency_arg
-    else:
-        # Limit concurrency default to avoid resource exhaustion on local/small setups
-        # But allow scaling if ray is clustered (though cpu_count is local)
-        # For now, keep the safe default but raise it slightly or leave as auto if None is preferred?
-        # User wants "distributed", so let's default to (cpu_count - 1) or similar if not specified?
-        # Or just use the old safe default but allow override.
+    # We respect config.concurrency if set, else auto.
+    concurrency = config.concurrency
+
+    # Logic in previous version was: if None, default to min(4, cpu_count).
+    # We can preserve this heuristic if concurrency is None.
+    if concurrency is None:
         concurrency = min(4, os.cpu_count() or 1)
 
-    batch_size = getattr(args, "batch_size", 4096)
+    batch_size = config.batch_size
 
     ds_sig = ds.map_batches(
-        MinHashCompute,
+        MinHashCompute,  # pyright: ignore[reportArgumentType]
         batch_size=batch_size,
-        concurrency=concurrency,
+        compute=rd.ActorPoolStrategy(size=concurrency),  # pyright: ignore[reportArgumentType]
     )
 
     out_path = output_dir / "minhash_parquet"
     out_path.mkdir(parents=True, exist_ok=True)
 
-    print(f"Writing minhash results to {out_path}...")
+    logger.info(f"Writing minhash results to {out_path}...")
     ds_sig.write_parquet(str(out_path.absolute()))
 
     count = ds_sig.count()
-    print(f"Computed minhash for {count} docs.")
+    logger.info(f"Computed minhash for {count} docs.")
 
     return {"docs_processed": count, "output_path": str(out_path)}
 
 
 def main():
-    p = argparse.ArgumentParser("MinHash Step")
-    p.add_argument("--input", default="./outputs/dev/cleaned_parquet")
-    p.add_argument("--output-dir", default="./outputs/dev")
-    args = p.parse_args()
-
-    import ray
-
-    ray.init()
-    run_minhash(args)
-
-
-if __name__ == "__main__":
-    main()
+    run_step_entrypoint(
+        description="MinHash Step",
+        run_func=run_minhash,
+        add_args_func=add_args,
+        step_name="MinHash",
+    )
