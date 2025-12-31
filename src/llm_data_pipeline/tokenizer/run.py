@@ -413,7 +413,7 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
         input_path = str(manual_input)
     else:
         # We rely on resolve logic + standard naming
-        resolved_input_path, _ = resolve_io_paths(config, "tokenize", "quality")
+        resolved_input_path, _ = resolve_io_paths(config, "tokenize", "clustering")
         input_path = str(resolved_input_path)
 
     output_dir_base = config.output_base

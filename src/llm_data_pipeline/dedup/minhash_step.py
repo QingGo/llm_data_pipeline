@@ -77,7 +77,7 @@ def run_minhash(config: PipelineConfig, **kwargs) -> dict:
         step_name="minhash",
         process_func=_process_minhash,
         config=config,
-        input_step_name="clean",
+        input_step_name="pii",
         **kwargs
     )
     

@@ -7,6 +7,11 @@ import pyarrow as pa
 import pyarrow.compute as pc
 import ray.data as rd
 from ray.data import ActorPoolStrategy
+import spacy
+from presidio_analyzer import AnalyzerEngine
+from presidio_analyzer.nlp_engine import NlpEngineProvider
+from presidio_anonymizer import AnonymizerEngine
+from presidio_anonymizer.entities import OperatorConfig
 
 from llm_data_pipeline.core import (
     PipelineConfig,
@@ -176,19 +181,6 @@ class PresidioPersonNER:
     def __init__(self, cfg: Config):
         self.cfg = cfg
 
-        try:
-            import spacy
-            from presidio_analyzer import AnalyzerEngine
-            from presidio_analyzer.nlp_engine import NlpEngineProvider
-            from presidio_anonymizer import AnonymizerEngine
-            from presidio_anonymizer.entities import OperatorConfig
-        except Exception as e:
-            raise RuntimeError(
-                "Presidio or spacy not installed. Install:\n"
-                "  pip install presidio-analyzer presidio-anonymizer spacy\n"
-                "and download spaCy models you use (e.g. en_core_web_sm, zh_core_web_sm).\n"
-            ) from e
-
         if not self.cfg.supported_langs:
             self.cfg.supported_langs = ["en", "zh"]
         if not self.cfg.spacy_models:
@@ -210,7 +202,7 @@ class PresidioPersonNER:
             raise RuntimeError(
                 f"Missing spaCy models: {', '.join(missing_models)}. Download them with:\n"
                 f"  python -m spacy download {' '.join(missing_models)}\n"
-                "Or disable NER processing with --disable-ner flag.\n"
+                "Or enable NER processing with --enable-ner flag.\n"
             )
 
         # Build NLP engine with multi-language spaCy models
@@ -242,7 +234,7 @@ class PresidioPersonNER:
                 "Possible solutions:\n"
                 "1. Ensure spaCy models are downloaded\n"
                 "2. Check if Presidio version is compatible with your Python version\n"
-                "3. Disable NER processing with --disable-ner flag\n"
+                "3. Enable NER processing with --enable-ner flag\n"
             ) from e
 
     def __call__(self, batch: pa.Table) -> pa.Table:
@@ -260,15 +252,19 @@ class PresidioPersonNER:
 
         out_text = list(text)
 
-        # Process row-by-row (Presidio analyze is per-text).
-        # We skip rows not in need_ner or unsupported languages.
-        for i, (t, lang, do_ner) in enumerate(zip(text, langs, need, strict=True)):
-            if not do_ner or not isinstance(t, str) or not t:
-                continue
-            if not isinstance(lang, str) or not self.cfg.supported_langs or lang not in self.cfg.supported_langs:
-                continue
+        # Process only rows that need NER processing and have supported languages
+        # Filter rows first to reduce processing overhead
+        rows_to_process = [(i, t, lang) for i, (t, lang, do_ner) in enumerate(zip(text, langs, need, strict=True)) 
+                          if do_ner and isinstance(t, str) and t and 
+                          isinstance(lang, str) and self.cfg.supported_langs and lang in self.cfg.supported_langs]
 
+        # Process rows in bulk with optimized handling
+        for i, t, lang in rows_to_process:
             try:
+                # Optimize: Only analyze if text is long enough to contain a name
+                if len(t) < 3:  # Skip very short texts
+                    continue
+                
                 results = self.analyzer.analyze(
                     text=t,
                     entities=self.entities,
@@ -306,7 +302,7 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--batch-size-structured", type=int, default=4096, help="Rows per batch for structured redaction")
     p.add_argument("--batch-size-ner", type=int, default=256, help="Rows per batch for NER stage (smaller is safer)")
     p.add_argument("--actors-ner", type=int, default=8, help="Actor pool size for Presidio NER stage")
-    p.add_argument("--disable-ner", action="store_true", help="Disable PERSON NER stage entirely")
+    p.add_argument("--enable-ner", action="store_true", help="Enable PERSON NER stage (default: disabled)")
     p.add_argument("--keep-stats", action="store_true", help="Keep pii_has_* columns in output")
     p.add_argument("--supported-langs", default="en,zh", help="NER supported langs, comma-separated (default: en,zh)")
     p.add_argument("--spacy-en", default="en_core_web_sm", help="spaCy model for English")
@@ -324,7 +320,7 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument(
         "--lang-col", default="", help="Optional language column (e.g. lang). If missing/empty, heuristic en/zh."
     )
-    p.add_argument("--disable-ner", action="store_true", help="Disable PERSON NER stage entirely")
+    p.add_argument("--enable-ner", action="store_true", help="Enable PERSON NER stage (default: disabled)")
     p.add_argument("--keep-stats", action="store_true", help="Keep pii_has_* columns in output")
     p.add_argument("--supported-langs", default="en,zh", help="NER supported langs, comma-separated (default: en,zh)")
     p.add_argument("--spacy-en", default="en_core_web_sm", help="spaCy model for English")
@@ -345,7 +341,7 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
     logger.info("PII: Building PII config")
     text_col = kwargs.get("text_col", "text")
     lang_col = kwargs.get("lang_col", "").strip() or None
-    disable_ner = kwargs.get("disable_ner", False)
+    enable_ner = kwargs.get("enable_ner", False)
     keep_stats = kwargs.get("keep_stats", False)
     supported_langs = [x.strip() for x in kwargs.get("supported_langs", "en,zh").split(",") if x.strip()]
     spacy_models = {
@@ -361,7 +357,7 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
         text_col=text_col,
         lang_col=lang_col,
         keep_stats=keep_stats,
-        enable_person_ner=(not disable_ner),
+        enable_person_ner=enable_ner,
         supported_langs=supported_langs,
         spacy_models=spacy_models,
         ner_score_threshold=ner_score_threshold,
@@ -425,7 +421,7 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
                     )
             except Exception as e:
                 logger.warning(f"PII: NER processing failed, skipping PERSON redaction: {e}")
-                logger.warning("PII: To disable NER processing, use the --disable-ner flag")
+                logger.warning("PII: NER is disabled by default. To enable NER processing, use the --enable-ner flag")
                 # Skip NER processing, use original data
                 pass
 

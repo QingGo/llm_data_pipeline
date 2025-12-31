@@ -233,10 +233,13 @@ def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: st
         # Convention: step X outputs to base/X_parquet
         # Special case: token_packing output is conventionally token_packing_parquet
         # Special case: clean output is conventionally cleaned_parquet
+        # Special case: clustering output is conventionally deduped_parquet
         if input_step_name == "token_packing":
             input_path = base / "token_packing_parquet"
         elif input_step_name == "clean":
             input_path = base / "cleaned_parquet"
+        elif input_step_name == "clustering":
+            input_path = base / "deduped_parquet"
         else:
             input_path = base / f"{input_step_name}_parquet"
         logger.info(f"Step {step_name}: Using derived input path from {input_step_name}: {input_path}")
@@ -371,8 +374,8 @@ def step_wrapper(
     
     # 5. Write output with output stats
     logger.info(f"{step_name}: Writing output")
+    output_count = ds_out.count()  # Get count first to avoid duplicate computation
     output_file_count, output_total_size = write_parquet(ds_out, output_path, logger)
-    output_count = ds_out.count()
     logger.info(f"{step_name}: Output stats - files: {output_file_count}, size: {output_total_size:,} bytes, records: {output_count}")
     
     # 6. Calculate total duration and prepare stats

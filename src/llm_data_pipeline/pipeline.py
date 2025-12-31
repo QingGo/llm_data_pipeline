@@ -46,7 +46,7 @@ def main():
     p.add_argument("--langs", default="zh,en", help="Languages for quality filter")
     
     # PII specific args
-    p.add_argument("--disable-ner", action="store_true", help="Disable PERSON NER stage entirely")
+    p.add_argument("--enable-ner", action="store_true", help="Enable PERSON NER stage (default: disabled)")
     p.add_argument("--text-col", default="text", help="Text column name (default: text)")
     p.add_argument("--lang-col", default="", help="Optional language column for PII")
     p.add_argument("--keep-stats", action="store_true", help="Keep pii_has_* columns in output")
@@ -145,7 +145,7 @@ def main():
             extra["langs"] = args.langs
         elif name == "pii":
             # PII specific args
-            extra["disable_ner"] = args.disable_ner
+            extra["enable_ner"] = args.enable_ner
             extra["text_col"] = args.text_col
             extra["lang_col"] = args.lang_col
             extra["keep_stats"] = args.keep_stats

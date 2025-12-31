@@ -9,7 +9,6 @@ chmod +x download_models.sh
 # ./download_models.sh
 
 echo "=== Starting Unified LLM Data Pipeline ==="
-echo "Logs will be written to outputs/dev/pipeline.log"
 
 # Forward all arguments to the python orchestrator
 # Example usage:

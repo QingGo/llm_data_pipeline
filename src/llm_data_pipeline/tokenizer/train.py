@@ -20,7 +20,7 @@ def write_shards_with_ray(
     num_shards: int,
     max_chars: int,
     limit: int = 0,
-) -> list[str]:
+) -> tuple[list[str], int]:
     logger = PipelineLogger.get()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -37,6 +37,9 @@ def write_shards_with_ray(
     if limit > 0:
         logger.info(f"DEBUG: Limiting tokenizer training input to {limit} records.")
         ds = ds.limit(limit)
+
+    # Get input count before further processing
+    input_count = ds.count()
 
     if max_chars > 0:
         ds = ds.map(lambda r: {"text": str(r["text"])[:max_chars]})
@@ -59,7 +62,7 @@ def write_shards_with_ray(
         return str(p)
 
     paths = ray.get([_write_one.remote(i, s, str(out_dir.absolute())) for i, s in enumerate(splits)])
-    return paths
+    return paths, input_count
 
 
 def train_sentencepiece_py(
@@ -70,6 +73,14 @@ def train_sentencepiece_py(
     model_type: str,
     character_coverage: float,
 ):
+    import io
+    import os
+    import sys
+    import tempfile
+    from contextlib import contextmanager
+    from llm_data_pipeline.core import PipelineLogger
+    
+    logger = PipelineLogger.get()
     model_prefix.parent.mkdir(parents=True, exist_ok=True)
 
     kwargs = dict(
@@ -97,7 +108,101 @@ def train_sentencepiece_py(
             shuffle_input_sentence=True,
         )
 
-    spm.SentencePieceTrainer.Train(**kwargs)
+    @contextmanager
+    def redirect_cpp_output():
+        """Redirect C++ stdout/stderr to temporary files using file descriptor manipulation."""
+        # Create temporary files for stdout and stderr
+        stdout_fd, stdout_path = tempfile.mkstemp()
+        stderr_fd, stderr_path = tempfile.mkstemp()
+        
+        # Save original file descriptors
+        original_stdout = os.dup(1)
+        original_stderr = os.dup(2)
+        
+        try:
+            # Redirect stdout and stderr to temporary files
+            os.dup2(stdout_fd, 1)
+            os.dup2(stderr_fd, 2)
+            
+            # Close the temporary file descriptors (we'll read from the files later)
+            os.close(stdout_fd)
+            os.close(stderr_fd)
+            
+            yield stdout_path, stderr_path
+        finally:
+            # Restore original stdout and stderr
+            os.dup2(original_stdout, 1)
+            os.dup2(original_stderr, 2)
+            
+            # Close the saved file descriptors
+            os.close(original_stdout)
+            os.close(original_stderr)
+
+    # Redirect stdout and stderr from sentencepiece C++ code to logger
+    logger.info(f"Starting SentencePiece training with model_type={model_type}, vocab_size={vocab_size}")
+    
+    try:
+        # Use file descriptor redirection to capture C++ output
+        with redirect_cpp_output() as (stdout_path, stderr_path):
+            # Run SentencePiece training
+            spm.SentencePieceTrainer.Train(**kwargs)
+        
+        # Read captured output from temporary files
+        with open(stdout_path, 'r') as f:
+            stdout_output = f.read()
+        with open(stderr_path, 'r') as f:
+            stderr_output = f.read()
+        
+        # Clean up temporary files
+        os.unlink(stdout_path)
+        os.unlink(stderr_path)
+        
+        # Log captured output
+        if stdout_output.strip():
+            # Only log stdout if it's not just empty or whitespace
+            logger.info(f"SentencePiece stdout: {stdout_output.strip()}")
+        if stderr_output.strip():
+            # Filter out all non-error logs from C++ code
+            for line in stderr_output.splitlines():
+                if line:
+                    stripped_line = line.strip()
+                    # Skip INFO logs
+                    if "LOG(INFO)" in stripped_line and (".cc(" in stripped_line or ".cpp(" in stripped_line):
+                        continue
+                    # Skip all configuration logs
+                    if any(keyword in stripped_line for keyword in [
+                        "trainer_spec", "input:", "model_prefix:", "vocab_size:", 
+                        "model_type:", "character_coverage:", "byte_fallback:", 
+                        "split_by_", "remove_extra_whitespaces:", 
+                        "normalization_rule_name:", "num_threads:", "unk_id:", 
+                        "bos_id:", "eos_id:", "pad_id:", "input_sentence_size:", 
+                        "shuffle_input_sentence:", "input_format:", "self_test_sample_size:",
+                        "seed_sentencepiece_size:", "shrinking_factor:", "max_sentence_length:",
+                        "num_sub_iterations:", "max_sentencepiece_length:", "split_digits:",
+                        "pretokenization_delimiter:", "treat_whitespace_as_suffix:",
+                        "allow_whitespace_only_pieces:", "required_chars:",
+                        "vocabulary_output_piece_score:", "train_extremely_large_corpus:",
+                        "seed_sentencepieces_file:", "hard_vocab_limit:", "use_all_vocab:",
+                        "unk_piece:", "bos_piece:", "eos_piece:", "pad_piece:",
+                        "unk_surface:", "enable_differential_privacy:",
+                        "differential_privacy_noise_level:", "differential_privacy_clipping_threshold:",
+                        "normalizer_spec", "denormalizer_spec", "}",
+                    ]):
+                        continue
+                    # Skip meta piece logs
+                    if "Adding meta_piece:" in stripped_line:
+                        continue
+                    # Skip empty lines and lines with just punctuation
+                    if not stripped_line or stripped_line in ["{", "}", ":"]:
+                        continue
+                    # Only log actual warnings and errors (lines containing .cc( and LOG(WARNING) or LOG(ERROR))
+                    if (".cc(" in stripped_line or ".cpp(" in stripped_line) and ("LOG(WARNING)" in stripped_line or "LOG(ERROR)" in stripped_line):
+                        logger.warning(f"SentencePiece stderr: {stripped_line}")
+    except Exception as e:
+        logger.error(f"SentencePiece training failed: {e}")
+        raise
+    
+    logger.info(f"SentencePiece training completed successfully")
 
 
 def compare_token_lengths(spm_model_path: Path, text: str):
@@ -145,7 +250,7 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
     import time
     total_start = time.time()
     
-    input_path_base, output_dir_base = resolve_io_paths(config, "train_tokenizer", "quality")
+    input_path_base, output_dir_base = resolve_io_paths(config, "train_tokenizer", "clustering")
 
     def get_arg(name, default=None):
         return kwargs.get(name, default)
@@ -158,7 +263,7 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
         # resolve_io_paths returns folder
         input_path = input_path_base
     else:
-        input_path = output_dir_base / "quality_parquet"
+        input_path = output_dir_base / "deduped_parquet"
 
     # We defaults based on base_out if not set
     work_dir = Path(get_arg("work_dir", output_dir_base / "tokenizers/working"))
@@ -181,7 +286,7 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
 
     print("Step 1) Write text shards from parquet...")
     process_start = time.time()
-    txt_paths = write_shards_with_ray(
+    txt_paths, input_count = write_shards_with_ray(
         parquet_dir=input_path,
         out_dir=shard_dir,
         num_shards=num_shards,
@@ -226,7 +331,7 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
         "input_path": str(input_path),
         "input_file_count": input_file_count,
         "input_total_size": input_total_size,
-        "input_count": 0,  # Train tokenizer doesn't count input records
+        "input_count": input_count,  # Use the actual input count from dataset
         "output_path": str(model_prefix.parent),
         "output_file_count": output_file_count,
         "output_total_size": output_total_size,

@@ -67,6 +67,10 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     if max_files and max_files > 0:
         files = files[:max_files]
 
+    # Calculate input stats
+    input_file_count = len(files)
+    input_total_size = sum(f.stat().st_size for f in files)
+
     cfg = IngestConfig(
         min_text_chars=kwargs.get("min_text_chars", 200),
         max_text_chars=kwargs.get("max_text_chars", 200_000),
@@ -79,8 +83,8 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
         return {
             "step_name": "ingest",
             "input_path": str(data_dir),
-            "input_file_count": 0,
-            "input_total_size": 0,
+            "input_file_count": input_file_count,
+            "input_total_size": input_total_size,
             "input_count": 0,
             "output_path": str(output_path),
             "output_file_count": 0,
@@ -125,14 +129,14 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     stats = {
         "step_name": "ingest",
         "input_path": str(data_dir),
-        "input_file_count": len(files),
-        "input_total_size": 0,  # Ingest stage doesn't have input parquet files
-        "input_count": 0,        # Ingest stage doesn't have input records
+        "input_file_count": input_file_count,
+        "input_total_size": input_total_size,
+        "input_count": 0,        # Ingest stage creates new records, doesn't process existing ones
         "output_path": str(output_path),
         "output_file_count": output_file_count,
         "output_total_size": output_total_size,
         "output_count": doc_count,
-        "files_processed": len(files),  # Keep for backward compatibility
+        "files_processed": input_file_count,  # Keep for backward compatibility
         "docs_ingested": doc_count,     # Keep for backward compatibility
         "duration_seconds": total_end - total_start,
         "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_end - total_start)),

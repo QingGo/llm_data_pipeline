@@ -23,6 +23,8 @@ def run_export(config: PipelineConfig, **kwargs) -> dict:
     """Export to binary step"""
     logger = PipelineLogger.get()
     base_calc_out = config.output_base
+    import time
+    total_start = time.time()
 
     # Resolve input directory
     input_dir = kwargs.get("input_dir")
@@ -59,6 +61,19 @@ def run_export(config: PipelineConfig, **kwargs) -> dict:
     total_tokens = 0
     limit = config.limit
     files_processed = 0
+
+    # Get input stats
+    from llm_data_pipeline.core import get_directory_stats
+    input_file_count, input_total_size = get_directory_stats(input_dir)
+
+    # Calculate output_count (token chunks) by reading the first file's schema
+    output_count = 0
+    if files:
+        first_file = files[0]
+        table = pq.read_table(first_file, columns=["input_ids"])
+        # Assume all files have the same chunk size
+        chunks_per_file = table.num_rows
+        output_count = chunks_per_file * len(files)
 
     with open(output_file, "wb") as f:
         for pf in files:
@@ -103,7 +118,35 @@ def run_export(config: PipelineConfig, **kwargs) -> dict:
 
     logger.info(f"Done. Wrote {total_tokens} tokens to {output_file}")
 
-    return {"files_processed": len(files), "total_tokens": total_tokens, "output_file": str(output_file)}
+    # Get output stats
+    output_file_count = 1  # Only one output file
+    output_total_size = output_file.stat().st_size if output_file.exists() else 0
+
+    # Calculate total duration
+    total_end = time.time()
+    total_duration = total_end - total_start
+
+    # Prepare comprehensive stats in the same format as other steps
+    stats = {
+        "step_name": "export",
+        "input_path": str(input_dir),
+        "input_file_count": input_file_count,
+        "input_total_size": input_total_size,
+        "input_count": output_count,  # Number of token chunks
+        "output_path": str(output_file.parent),
+        "output_file_count": output_file_count,
+        "output_total_size": output_total_size,
+        "output_count": output_count,  # Number of token chunks
+        "files_processed": len(files),
+        "total_tokens": total_tokens,
+        "output_file": str(output_file),
+        "dtype": dtype_str,
+        "duration_seconds": total_duration,
+        "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+        "process_duration_seconds": total_duration,  # Same as total for now
+    }
+
+    return stats
 
 
 def main():
