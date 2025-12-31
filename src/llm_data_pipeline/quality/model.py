@@ -27,13 +27,21 @@ def _patched_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
 
     # single string
     text = check(text)
-    predictions = self.f.predict(text, k, threshold, on_unicode_error)  # [(prob, label), ...]
-    if predictions:
-        probs, labels = zip(*predictions, strict=True)  # unzip
-    else:
-        probs, labels = ([], ())
+    # fasttext's predict method returns a tuple of lists: (labels, probs)
+    # where labels is a list of strings like ['__label__en']
+    # and probs is a list of floats like [0.98]
+    result = self.f.predict(text, k, threshold, on_unicode_error)
 
-    return labels, np.asarray(probs, dtype=np.float32)
+    # Handle different return formats based on fasttext version
+    if isinstance(result, tuple) and len(result) == 2:
+        # Format: (labels, probs)
+        labels, probs = result
+    else:
+        # Fallback for unexpected formats
+        labels = []
+        probs = []
+
+    return labels, np.asarray(probs, dtype=np.float32) if probs else np.array([], dtype=np.float32)
 
 
 fasttext.FastText._FastText.predict = _patched_predict
@@ -203,7 +211,11 @@ class LanguageFilter:
     threshold: float = 0.4
 
     def __post_init__(self) -> None:
-        self.logger = PipelineLogger.get()
+        # Use regular logging instead of PipelineLogger to avoid issues in Ray actors
+        import logging
+
+        self.logger = logging.getLogger("llm_data_pipeline.quality")
+
         self.logger.info(f"Loading fastText LID model: {self.model_path}")
         self.model = fasttext.load_model(self.model_path)
         # Normalize allowed langs to fasttext label format

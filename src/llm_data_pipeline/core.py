@@ -1,7 +1,6 @@
 import argparse
 import dataclasses
 import logging
-import os
 import sys
 import time
 from collections.abc import Callable
@@ -198,6 +197,7 @@ def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: st
     The function follows these conventions:
     - Input path from previous step: base/<previous_step_name>_parquet
     - Special case for token_packing: base/token_packing_parquet
+    - Special case for clean: base/cleaned_parquet
     - Output directory: base (each step will create its own subdirectory)
 
     Args:
@@ -210,21 +210,29 @@ def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: st
     """
     base = config.output_base
     output_dir = base
+    logger = PipelineLogger.get()
 
     # Check if input is provided via config
     if hasattr(config, "input") and config.input:
-        return Path(config.input), output_dir
+        input_path = Path(config.input)
+        logger.info(f"Step {step_name}: Using explicit input path from config: {input_path}")
+        return input_path, output_dir
 
     # Input comes from previous step's parquet folder usually
     if input_step_name:
         # Convention: step X outputs to base/X_parquet
         # Special case: token_packing output is conventionally token_packing_parquet
+        # Special case: clean output is conventionally cleaned_parquet
         if input_step_name == "token_packing":
             input_path = base / "token_packing_parquet"
+        elif input_step_name == "clean":
+            input_path = base / "cleaned_parquet"
         else:
             input_path = base / f"{input_step_name}_parquet"
+        logger.info(f"Step {step_name}: Using derived input path from {input_step_name}: {input_path}")
     else:
         input_path = base  # Fallback when no previous step
+        logger.info(f"Step {step_name}: Using fallback input path: {input_path}")
 
     return input_path, output_dir
 
@@ -260,6 +268,14 @@ def write_parquet(ds: rd.Dataset, output_path: Path, logger: logging.Logger) -> 
     """
     Writes a Ray Dataset to parquet files.
     """
+    import shutil
+
+    # Clear the output directory if it exists
+    if output_path.exists():
+        logger.info(f"Clearing output directory {output_path}...")
+        shutil.rmtree(output_path)
+
+    # Create the output directory
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Writing results to {output_path}...")
     ds.write_parquet(str(output_path.absolute()))
@@ -282,6 +298,11 @@ def run_step(
 
         duration = time.time() - start_time
         logger.info(f"=== Finished Step: {step_name} in {time.strftime('%H:%M:%S', time.gmtime(duration))} ===")
+
+        # Add processing time to stats
+        stats["duration_seconds"] = duration
+        stats["duration_human"] = time.strftime("%H:%M:%S", time.gmtime(duration))
+
         logger.info(f"Stats: {stats}")
         return stats
     except Exception as e:
@@ -354,9 +375,14 @@ def validate_input_path(input_path: Path, step_name: str) -> None:
         raise FileNotFoundError(f"Input path {input_path} does not exist for {step_name} step.")
 
 
-def validate_model_path(model_path: str | Path, step_name: str) -> None:
+def validate_model_path(model_path: str | Path, step_name: str) -> str:
     """
-    Validates that the model path exists.
+    Validates that the model path exists and returns the absolute path.
     """
-    if not os.path.exists(model_path):
-        raise RuntimeError(f"Model not found at {model_path} for {step_name} step. Please download it first.")
+    # Convert to Path object to handle relative paths
+    model_path = Path(model_path)
+    # Get absolute path
+    abs_model_path = model_path.absolute()
+    if not abs_model_path.exists():
+        raise RuntimeError(f"Model not found at {abs_model_path} for {step_name} step. Please download it first.")
+    return str(abs_model_path)

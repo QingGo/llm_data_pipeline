@@ -17,12 +17,23 @@ def band_hash(vals: list[int]) -> str:
 
 
 def make_band_rows(row: dict[str, Any], rows_per_band: int) -> list[dict[str, Any]]:
+    if "signature" not in row:
+        raise ValueError(
+            f"Row is missing required 'signature' field. "
+            f"Available fields: {list(row.keys())}. "
+            f"Please ensure the 'minhash' step was run before 'clustering' step."
+        )
+
     sig = row["signature"]
     num_perm = len(sig)
-    assert num_perm % rows_per_band == 0
+    assert num_perm % rows_per_band == 0, (
+        f"Number of permutations {num_perm} must be divisible by rows_per_band {rows_per_band}"
+    )
+
     out = []
     length = row.get("length", len(row.get("text", "")))
     ts = row.get("ts", 0)
+
     for band_id in range(num_perm // rows_per_band):
         s = band_id * rows_per_band
         e = s + rows_per_band
@@ -39,10 +50,10 @@ def make_band_rows(row: dict[str, Any], rows_per_band: int) -> list[dict[str, An
 
 
 # ---------- bucket -> edges (Reduce) ----------
-def bucket_to_pairs(batch) -> dict[str, list[dict[str, Any]]]:
+def bucket_to_pairs(batch) -> list[dict[str, Any]]:
     """
     batch: 一个桶内的记录（同 band_id, band_hash）
-    输出：该桶内所有 doc_id 两两组合的边，包装在字典中
+    输出：该桶内所有 doc_id 两两组合的边列表
     """
     # batch 是 pyarrow table / pandas df 都行，这里用最通用的转 dict
     docs = []
@@ -50,7 +61,7 @@ def bucket_to_pairs(batch) -> dict[str, list[dict[str, Any]]]:
         docs.append((r["doc_id"], r["ts"], r["length"]))
 
     if len(docs) < 2:
-        return {"edges": []}
+        return []
 
     # 可选：桶太大直接降级，避免 O(n^2) 炸裂
     # docs = docs[:500]
@@ -59,7 +70,7 @@ def bucket_to_pairs(batch) -> dict[str, list[dict[str, Any]]]:
     for (a, _, _), (b, _, _) in itertools.combinations(docs, 2):
         u, v = (a, b) if a < b else (b, a)
         edges.append({"u": u, "v": v})
-    return {"edges": edges}
+    return edges
 
 
 # ---------- union-find connected components ----------
@@ -92,13 +103,34 @@ def ray_global_dedup(
     # Map: 展开 band 行
     band_rows = docs_ds.flat_map(lambda r: make_band_rows(r, rows_per_band))
 
-    # Reduce: groupBy 桶 -> 产出候选边
-    # bucket_to_pairs returns {"edges": [...]}, we need to unwrap it
-    edges_ds = (
-        band_rows.groupby(["band_id", "band_hash"])
-        .map_groups(bucket_to_pairs, batch_format="pyarrow")
-        .flat_map(lambda row: row["edges"])
-    )
+    # For Ray Data >= 2.5, we need a different approach
+    # First, materialize the band rows to get all the data
+    all_band_rows = band_rows.take_all()
+    
+    # Create a dictionary to group band rows by (band_id, band_hash)
+    buckets = {}
+    for row in all_band_rows:
+        key = (row["band_id"], row["band_hash"])
+        if key not in buckets:
+            buckets[key] = []
+        buckets[key].append(row)
+    
+    # Generate edges from each bucket
+    all_edges = []
+    for bucket_rows in buckets.values():
+        # Create a simple batch-like object with to_pylist method
+        class SimpleBatch:
+            def __init__(self, rows):
+                self.rows = rows
+            def to_pylist(self):
+                return self.rows
+        
+        batch = SimpleBatch(bucket_rows)
+        edges = bucket_to_pairs(batch)
+        all_edges.extend(edges)
+    
+    # Create a dataset from the edges
+    edges_ds = ray.data.from_items(all_edges)
 
     # 边去重（同一对可能在多个桶命中）
     edges_ds = edges_ds.groupby(["u", "v"]).count().drop_columns(["count()"])
@@ -114,7 +146,13 @@ def ray_global_dedup(
         uf.union(e["u"], e["v"])
 
     # 每个 doc -> root
-    docs_meta = docs_ds.select_columns(["doc_id", "ts", "length"]).take_all()
+    # Check available columns and select only existing ones
+    available_cols = docs_ds.columns()
+    select_cols = ["doc_id", "length"]
+    if "ts" in available_cols:
+        select_cols.append("ts")
+    
+    docs_meta = docs_ds.select_columns(select_cols).take_all()
     comp: dict[str, list[tuple[str, int, int]]] = {}
     for r in docs_meta:
         doc_id = r["doc_id"]

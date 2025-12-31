@@ -21,6 +21,9 @@ from llm_data_pipeline.tokenizer.train import run_train_tokenizer
 
 
 def main():
+    # Re-import json to ensure it's available in this function
+    import json
+
     p = argparse.ArgumentParser("LLM Data Pipeline Orchestrator")
     p.add_argument(
         "--steps",
@@ -113,6 +116,20 @@ def main():
         else:
             steps_to_run = steps_to_run[start_idx:]
 
+    # Initialize stats dictionary to store all step statistics
+    pipeline_stats = {}
+
+    # Load existing stats if they exist
+    stats_file = out_dir / "pipeline_stats.json"
+    if stats_file.exists():
+        try:
+            with open(stats_file) as f:
+                pipeline_stats = json.load(f)
+            logger.info(f"Loaded existing stats from {stats_file}")
+        except Exception as e:
+            logger.warning(f"Failed to load existing stats: {e}")
+            pipeline_stats = {}
+
     for name, func in steps_to_run:
         # Prepare extra args for specific steps if needed
         extra = {}
@@ -122,9 +139,22 @@ def main():
         # Ensure we silence Ray again before each step
         silence_ray_loggers(logger)
 
-        run_step(name, func, config, logger, extra_args=extra)
+        # Run step and capture stats
+        step_stats = run_step(name, func, config, logger, extra_args=extra)
+
+        # Store step stats
+        pipeline_stats[name] = step_stats
+
+        # Save stats after each step
+        try:
+            with open(stats_file, "w") as f:
+                json.dump(pipeline_stats, f, indent=2, default=str)
+            logger.info(f"Saved pipeline stats to {stats_file}")
+        except Exception as e:
+            logger.warning(f"Failed to save pipeline stats: {e}")
 
     logger.info("Pipeline finished successfully.")
+    logger.info(f"Final pipeline stats: {json.dumps(pipeline_stats, indent=2, default=str)}")
 
 
 if __name__ == "__main__":

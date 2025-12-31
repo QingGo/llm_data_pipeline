@@ -52,11 +52,16 @@ def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     # Validate input path
     validate_input_path(input_path, "minhash")
 
+    # Log input path and document count
+    logger.info(f"Reading MinHash input from: {input_path}")
     ds = rd.read_parquet(str(input_path.absolute()))
+    logger.info(f"Found {ds.count()} docs in input path before applying limit")
 
     limit = config.limit
     if limit > 0:
+        logger.info(f"Applying limit of {limit} docs to MinHash input")
         ds = ds.limit(limit)
+        logger.info(f"Input docs after limit: {ds.count()}")
 
     # Determine concurrency
     # We respect config.concurrency if set, else auto.
@@ -70,7 +75,7 @@ def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     batch_size = config.batch_size
 
     ds_sig = ds.map_batches(
-        MinHashCompute(),
+        MinHashCompute,
         batch_size=batch_size,
         compute=ActorPoolStrategy(size=concurrency),
     )
