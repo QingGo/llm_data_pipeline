@@ -44,7 +44,7 @@ def add_args(p: argparse.ArgumentParser) -> None:
 def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point"""
     logger = PipelineLogger.get()
-    
+
     # map args
     data_dir = Path(kwargs.get("data_dir", "./data/commoncrawl/"))
     pattern = kwargs.get("pattern", "**/*.wet.gz")

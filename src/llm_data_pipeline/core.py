@@ -1,10 +1,11 @@
 import argparse
+import dataclasses
 import logging
 import os
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -27,22 +28,38 @@ class PipelineConfig:
     model_path: str | None = None
     input: str | None = None
     threshold: float | None = None
+    # Step-specific config storage
+    _step_configs: dict[str, dict] = field(default_factory=dict, init=False)
+
+    def get_step_config(self, step_name: str) -> dict:
+        """Gets the configuration for a specific step."""
+        return self._step_configs.get(step_name, {})
+
+    def set_step_config(self, step_name: str, config: dict) -> None:
+        """Sets the configuration for a specific step."""
+        self._step_configs[step_name] = config
+
+    def get(self, name: str, default: Any = None) -> Any:
+        """Gets a configuration value, checking both the main config and step-specific configs."""
+        return getattr(self, name, default)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
         """Creates a PipelineConfig instance from argparse arguments."""
-        return cls(
-            output_base=Path(getattr(args, "output_base", "outputs/dev")),
-            ray_address=getattr(args, "ray_address", "auto"),
-            max_files=int(getattr(args, "max_files", 0)),
-            limit=int(getattr(args, "limit", 0)),
-            batch_size=int(getattr(args, "batch_size", 4096)),
-            concurrency=getattr(args, "concurrency", None),
-            resume_from=getattr(args, "resume_from", None),
-            model_path=getattr(args, "model_path", None),
-            input=getattr(args, "input", None),
-            threshold=getattr(args, "threshold", None),
-        )
+        # Extract main config fields
+        main_fields = [f.name for f in dataclasses.fields(cls) if f.init]
+        main_kwargs = {}
+
+        for fld in main_fields:
+            if hasattr(args, fld):
+                value = getattr(args, fld)
+                if fld == "output_base":
+                    value = Path(value)
+                elif fld in ["max_files", "limit", "batch_size"]:
+                    value = int(value)
+                main_kwargs[fld] = value
+
+        return cls(**main_kwargs)
 
 
 class PipelineLogger:
@@ -171,8 +188,25 @@ def get_arg_parser(description: str) -> argparse.ArgumentParser:
 
 def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: str | None = None) -> tuple[Path, Path]:
     """
-    Standard path resolution strategy.
-    Returns (input_path, output_dir).
+    Standard path resolution strategy for pipeline steps.
+
+    This function implements the standard path resolution logic for pipeline steps:
+    1. If an explicit input path is provided in the config, use that
+    2. Otherwise, derive the input path from the previous step's output directory
+    3. Return both the resolved input path and output directory
+
+    The function follows these conventions:
+    - Input path from previous step: base/<previous_step_name>_parquet
+    - Special case for token_packing: base/token_packing_parquet
+    - Output directory: base (each step will create its own subdirectory)
+
+    Args:
+        config: Pipeline configuration object
+        step_name: Name of the current step
+        input_step_name: Name of the previous step (if any)
+
+    Returns:
+        A tuple of (input_path, output_dir), both as Path objects
     """
     base = config.output_base
     output_dir = base
@@ -190,7 +224,7 @@ def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: st
         else:
             input_path = base / f"{input_step_name}_parquet"
     else:
-        input_path = base  # Fallback
+        input_path = base  # Fallback when no previous step
 
     return input_path, output_dir
 
@@ -198,6 +232,18 @@ def resolve_io_paths(config: PipelineConfig, step_name: str, input_step_name: st
 def read_parquet(input_path: Path, config: PipelineConfig) -> rd.Dataset:
     """
     Reads parquet files from the input path and applies limit if specified.
+
+    This function handles reading parquet files using Ray Data, with support for:
+    1. Reading from a directory containing multiple parquet files
+    2. Applying a record limit for debugging purposes
+    3. Logging the read operation
+
+    Args:
+        input_path: Path to the directory containing parquet files
+        config: Pipeline configuration object, which may include a limit
+
+    Returns:
+        A Ray Dataset containing the read records
     """
     logger = PipelineLogger.get()
     logger.info(f"Reading parquet from {input_path}")
@@ -224,7 +270,7 @@ def run_step(
     func: Callable,
     config: PipelineConfig,
     logger: logging.Logger,
-    extra_args: dict[str, Any] | None = None
+    extra_args: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     """
     Runs a pipeline step with logging and error handling.
@@ -252,29 +298,48 @@ def run_step_entrypoint(
 ) -> None:
     """
     Standard entry point for pipeline steps.
-    Handles arg parsing, logging setup, Ray init, and running the step.
+
+    This function provides a consistent entry point for all pipeline steps, handling:
+    1. Argument parsing with common and step-specific arguments
+    2. Logging setup with file and console output
+    3. Ray initialization (if enabled)
+    4. Running the step function with proper error handling
+    5. Exit code management
+
+    Args:
+        description: Description of the step for the argument parser
+        run_func: The main step function to execute, should accept PipelineConfig as first argument
+        add_args_func: Optional function to add step-specific arguments to the parser
+        step_name: Optional name for the step, defaults to first word of description
+        use_ray: Whether to initialize Ray for this step
     """
+    # Create argument parser with common arguments
     p = get_arg_parser(description)
+
+    # Add step-specific arguments if provided
     if add_args_func:
         add_args_func(p)
 
+    # Parse command line arguments
     args = p.parse_args()
 
-    # Deriving step name from description if not provided
+    # Derive step name from description if not provided
     if not step_name:
         step_name = description.split(" ")[0]
 
+    # Create PipelineConfig from parsed arguments
     config = PipelineConfig.from_args(args)
+
+    # Setup logging for the step
     logger = setup_logging(config.output_base, step_name=step_name)
 
+    # Initialize Ray if enabled
     if use_ray:
         init_ray(config.ray_address, logger)
 
     try:
-        # Convert args to Config if the function expects it
-        # We pass config as the first argument.
-        # We also pass **vars(args) to allow access to extra arguments not in Config
-        # This allows functions to signature match like (config: PipelineConfig, **kwargs)
+        # Execute the step function with config and all parsed arguments
+        # This allows the step function to access both structured config and raw arguments
         run_func(config, **vars(args))
     except Exception as e:
         logger.error(f"Step {step_name} failed: {e}", exc_info=True)
@@ -295,4 +360,3 @@ def validate_model_path(model_path: str | Path, step_name: str) -> None:
     """
     if not os.path.exists(model_path):
         raise RuntimeError(f"Model not found at {model_path} for {step_name} step. Please download it first.")
-

@@ -45,10 +45,10 @@ def add_args(p: argparse.ArgumentParser) -> None:
 def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     """Computes MinHash signatures for dedup."""
     logger = PipelineLogger.get()
-    
+
     # Resolve paths
     input_path, output_dir = resolve_io_paths(config, "minhash", "clean")
-    
+
     # Validate input path
     validate_input_path(input_path, "minhash")
 
@@ -70,7 +70,7 @@ def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     batch_size = config.batch_size
 
     ds_sig = ds.map_batches(
-        MinHashCompute,
+        MinHashCompute(),
         batch_size=batch_size,
         compute=ActorPoolStrategy(size=concurrency),
     )

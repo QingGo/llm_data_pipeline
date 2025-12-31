@@ -25,13 +25,13 @@ def add_args(p: argparse.ArgumentParser):
 def run_quality(config: PipelineConfig, **kwargs) -> dict:
     """Quality filtering step"""
     logger = PipelineLogger.get()
-    
+
     # Resolve paths
     input_path, output_dir = resolve_io_paths(config, "quality", "deduped")
-    
+
     # Validate input path
     validate_input_path(input_path, "quality")
-    
+
     # Model path
     model_path = getattr(config, "model_path", kwargs.get("model_path", "./models/lid.176.bin"))
     validate_model_path(model_path, "quality")
@@ -60,10 +60,7 @@ def run_quality(config: PipelineConfig, **kwargs) -> dict:
             row["lang_score"] = score
             return row
 
-    ds_scored = ds.map(
-        QualityMapper, 
-        compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4)
-    )
+    ds_scored = ds.map(QualityMapper(), compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4))
 
     # Filter
     ds_kept = ds_scored.filter(lambda r: r["quality_keep"])

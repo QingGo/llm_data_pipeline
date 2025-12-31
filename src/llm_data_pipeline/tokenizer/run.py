@@ -1,7 +1,6 @@
 import argparse
 import glob
 import json
-import logging
 import os
 from collections.abc import Iterable, Iterator
 from typing import Any
@@ -13,14 +12,10 @@ from datasets import load_dataset
 
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
 )
-
-logger = logging.getLogger(__name__)
-
-logger = logging.getLogger(__name__)
-
 
 # ... (inside run_tokenize)
 # ...
@@ -252,6 +247,7 @@ def write_parquet_shard(
 # -----------------------------
 def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     """Tokenize and pack step"""
+    logger = PipelineLogger.get()
 
     # Helper to resolve generic args
     def get_arg(name, default=None):

@@ -1,12 +1,11 @@
 import argparse
-import time
-from datetime import timedelta
 from pathlib import Path
 
 from llm_data_pipeline.clean.run import run_clean
 from llm_data_pipeline.core import (
     PipelineConfig,
     init_ray,
+    run_step,
     setup_logging,
     silence_ray_loggers,
 )
@@ -19,21 +18,6 @@ from llm_data_pipeline.ingest.run import run_ingest
 from llm_data_pipeline.quality.run import run_quality
 from llm_data_pipeline.tokenizer.run import run_tokenize
 from llm_data_pipeline.tokenizer.train import run_train_tokenizer
-
-
-def run_step(step_name: str, func, config: PipelineConfig, logger, extra_args: dict | None = None):
-    logger.info(f"=== Starting Step: {step_name} ===")
-    start_time = time.time()
-    try:
-        stats = func(config, **(extra_args or {}))
-
-        duration = time.time() - start_time
-        logger.info(f"=== Finished Step: {step_name} in {timedelta(seconds=duration)} ===")
-        logger.info(f"Stats: {stats}")
-        return stats
-    except Exception as e:
-        logger.error(f"Step {step_name} failed: {e}", exc_info=True)
-        raise
 
 
 def main():

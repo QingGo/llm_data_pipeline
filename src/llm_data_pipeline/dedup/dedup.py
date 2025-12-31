@@ -1,14 +1,12 @@
 import hashlib
 import itertools
-import logging
+from pathlib import Path
 from typing import Any
 
 import ray
 import ray.data as rd
 
 from llm_data_pipeline.dedup.minhash import char_ngrams, datasketch_minhash
-
-logger = logging.getLogger(__name__)
 
 
 # ---------- LSH banding (Map) ----------
@@ -146,6 +144,12 @@ def ray_global_dedup(
 
 
 if __name__ == "__main__":
+    from llm_data_pipeline.core import PipelineLogger, setup_logging
+
+    # 配置本地日志
+    logger = setup_logging(Path("./outputs/test"), "dedup")
+    logger = PipelineLogger.get()
+
     # 1. 准备测试数据
     docs = [
         {"doc_id": "doc1", "text": "今天天气不错，适合出去玩", "ts": 100},
@@ -176,7 +180,6 @@ if __name__ == "__main__":
     # rows_per_band 越小，band 数越多，召回率越高（越容易判定为相似），但也越慢
     result = ray_global_dedup(ds, rows_per_band=4)
 
-    # 5. 打印结果
     # 5. 打印结果
     logger.info("=== Dedup Result ===")
     logger.info(f"Total docs: {result['total_docs']}")

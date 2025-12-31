@@ -73,9 +73,6 @@ def run_clean(config: PipelineConfig, **kwargs) -> dict:
 
     write_parquet(kept_ds, kept_dir, logger)
 
-    # Optional: write dropped?
-    # write_parquet(drop_ds, drop_dir, logger)
-
     kept_count = kept_ds.count()
     drop_count = drop_ds.count()
     logger.info(f"kept_count = {kept_count}")

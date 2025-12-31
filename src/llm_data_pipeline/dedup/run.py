@@ -1,17 +1,16 @@
 import argparse
-import logging
 from pathlib import Path
 
 import ray.data as rd
 
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
+    validate_input_path,
 )
 from llm_data_pipeline.dedup.dedup import ray_global_dedup
-
-logger = logging.getLogger(__name__)
 
 
 def add_args(p: argparse.ArgumentParser) -> None:
@@ -21,6 +20,7 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 def run_clustering(config: PipelineConfig, **kwargs) -> dict:
     """Clustering & Dedup Step"""
+    logger = PipelineLogger.get()
     manual_input = kwargs.get("input")
     if manual_input:
         input_path = Path(manual_input)
@@ -30,8 +30,7 @@ def run_clustering(config: PipelineConfig, **kwargs) -> dict:
 
     rows_per_band = getattr(config, "rows_per_band", kwargs.get("rows_per_band", 4))
 
-    if not input_path.exists():
-        raise FileNotFoundError(f"Input path {input_path} does not exist for clustering.")
+    validate_input_path(input_path, "clustering")
 
     logger.info(f"Reading from {input_path}...")
     ds = rd.read_parquet(str(input_path.absolute()))

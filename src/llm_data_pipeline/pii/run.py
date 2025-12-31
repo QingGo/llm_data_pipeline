@@ -1,3 +1,5 @@
+# pyright: reportAttributeAccessIssue=false
+
 import argparse
 from dataclasses import dataclass
 
@@ -194,7 +196,7 @@ class PresidioPersonNER:
                 if lang in self.cfg.spacy_models
             ],
         }
-        provider = NlpEngineProvider(nlp_configuration)
+        provider = NlpEngineProvider(nlp_configuration)  # type: ignore
         nlp_engine = provider.create_engine()
 
         self.analyzer = AnalyzerEngine(
@@ -228,7 +230,7 @@ class PresidioPersonNER:
         for i, (t, lang, do_ner) in enumerate(zip(text, langs, need, strict=True)):
             if not do_ner or not isinstance(t, str) or not t:
                 continue
-            if not isinstance(lang, str) or lang not in self.cfg.supported_langs:
+            if not isinstance(lang, str) or not self.cfg.supported_langs or lang not in self.cfg.supported_langs:
                 continue
 
             try:
@@ -241,7 +243,7 @@ class PresidioPersonNER:
                 if results:
                     out_text[i] = self.anonymizer.anonymize(
                         text=t,
-                        analyzer_results=results,
+                        analyzer_results=results,  # type: ignore
                         operators=self.operators,
                     ).text
             except Exception:
@@ -310,13 +312,13 @@ def main():
         fn_constructor_kwargs={"cfg": cfg},
         batch_format="pyarrow",
         batch_size=args.batch_size_structured,
-        compute="tasks",
+        compute="tasks",  # type: ignore
         zero_copy_batch=True,
     )
 
     if cfg.enable_person_ner:
         # 2) Split dataset: run NER only where need_ner==True AND lang supported
-        supported = set(cfg.supported_langs)
+        supported = set(cfg.supported_langs or [])
 
         ds_ner = ds.filter(lambda r: bool(r["need_ner"]) and (r.get("ner_lang") in supported))
         ds_no = ds.filter(lambda r: (not bool(r["need_ner"])) or (r.get("ner_lang") not in supported))
@@ -332,7 +334,7 @@ def main():
         )
 
         # 4) Merge back
-        ds_out = ds_no.union(ds_ner)
+        ds_out = ds_no.union([ds_ner])
     else:
         ds_out = ds
 
@@ -342,7 +344,8 @@ def main():
         drop_cols += ["pii_has_email", "pii_has_ip4", "pii_has_ip6", "pii_has_phone", "pii_has_ssn"]
 
     # Only drop columns that exist
-    existing = [c for c in drop_cols if c in ds_out.schema().names]
+    schema = ds_out.schema()
+    existing = [c for c in drop_cols if schema and hasattr(schema, "names") and c in schema.names]
     if existing:
         ds_out = ds_out.drop_columns(existing)
 

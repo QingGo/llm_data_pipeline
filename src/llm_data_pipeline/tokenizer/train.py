@@ -1,5 +1,4 @@
 import argparse
-import logging
 from pathlib import Path
 
 import ray
@@ -9,11 +8,10 @@ from transformers import AutoTokenizer
 
 from llm_data_pipeline.core import (
     PipelineConfig,
+    PipelineLogger,
     resolve_io_paths,
     run_step_entrypoint,
 )
-
-logger = logging.getLogger(__name__)
 
 
 def write_shards_with_ray(
@@ -23,6 +21,7 @@ def write_shards_with_ray(
     max_chars: int,
     limit: int = 0,
 ) -> list[str]:
+    logger = PipelineLogger.get()
     out_dir.mkdir(parents=True, exist_ok=True)
 
     ds = rd.read_parquet(str(parquet_dir.absolute()))
@@ -142,6 +141,7 @@ def compare_token_lengths(spm_model_path: Path, text: str):
 
 def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
     """Train tokenizer step"""
+    logger = PipelineLogger.get()
     input_path_base, output_dir_base = resolve_io_paths(config, "train_tokenizer", "quality")
 
     def get_arg(name, default=None):

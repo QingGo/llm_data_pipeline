@@ -1,11 +1,10 @@
-import logging
 from dataclasses import dataclass
 
 import fasttext
 import fasttext.FastText
 import numpy as np
 
-logger = logging.getLogger(__name__)
+from llm_data_pipeline.core import PipelineLogger
 
 
 # Monkey patch fasttext to fix numpy 2.0 compatibility
@@ -47,13 +46,14 @@ class QualityFilter:
     pos_label: str | None = None  # 先跑一次打印 labels 再填
 
     def __post_init__(self) -> None:
-        logger.info(f"Loading fastText model: {self.model_path}")
+        self.logger = PipelineLogger.get()
+        self.logger.info(f"Loading fastText model: {self.model_path}")
         self.model = fasttext.load_model(self.model_path)
 
         self.all_labels: list[str] = list(map(str, self.model.get_labels()))
         if not self.all_labels:
             raise RuntimeError("No labels found in the model.")
-        logger.info(f"Model labels: {self.model.get_labels()}")
+        self.logger.info(f"Model labels: {self.model.get_labels()}")
         # 如果未指定正例标签，先给出提示，避免默默猜错
         if self.pos_label is None:
             raise ValueError("pos_label must be set to a valid label.")
@@ -65,13 +65,11 @@ class QualityFilter:
 
     def score(self, text: str) -> float:
         text = self.normalize(text)
-        # logger.debug(f"Normalized text: {text[:200]}") # Too verbose for production
         if not text:
             return 0.0
 
         # 取全量 label 的分数，避免 k 设置不够导致取不到目标 label
         labels, probs = self.model.predict(text, k=len(self.all_labels) + 1)
-        # logger.debug(f"len={len(text)} scores={dict(zip(labels, map(float, probs)))}")
         score_map: dict[str, float] = dict(zip(labels, probs, strict=True))
         pos_label = self.pos_label
         if pos_label is None:
@@ -195,7 +193,7 @@ if __name__ == "__main__":
     for text in samples:
         s = qf.score(text)
         status = "✅ 保留" if s >= qf.threshold else "❌ 丢弃"
-        logger.info(f"{status} | score={s:.4f} | {text[:80]}...")
+        qf.logger.info(f"{status} | score={s:.4f} | {text[:80]}...")
 
 
 @dataclass
@@ -205,7 +203,8 @@ class LanguageFilter:
     threshold: float = 0.4
 
     def __post_init__(self) -> None:
-        logger.info(f"Loading fastText LID model: {self.model_path}")
+        self.logger = PipelineLogger.get()
+        self.logger.info(f"Loading fastText LID model: {self.model_path}")
         self.model = fasttext.load_model(self.model_path)
         # Normalize allowed langs to fasttext label format
         self.allowed_labels = set()
@@ -213,7 +212,7 @@ class LanguageFilter:
             if not lang.startswith("__label__"):
                 lang = f"__label__{lang}"
             self.allowed_labels.add(lang)
-        logger.info(f"Allowed labels: {self.allowed_labels}")
+        self.logger.info(f"Allowed labels: {self.allowed_labels}")
 
     @staticmethod
     def normalize(text: str) -> str:
