@@ -235,11 +235,34 @@ class LanguageFilter:
         if not text:
             return ("__label__unknown", 0.0)
 
-        # predict returns tuple of lists: (['__label__en'], [0.98])
-        labels, probs = self.model.predict(text, k=1)
-        if not labels:
-            return ("__label__unknown", 0.0)
-        return labels[0], float(probs[0])
+        # 确保文本以换行符结尾，这是fasttext模型的要求
+        text_with_newline = text + "\n"
+
+        try:
+            # 直接调用C++接口，使用正确的参数顺序
+            result = self.model.f.predict(text_with_newline, 1, 0.0, "strict")
+
+            if result and len(result) > 0:
+                # 结果格式：[(prob, label)]
+                prob, label = result[0]
+                return label, float(prob)
+        except Exception as e:
+            self.logger.error(f"Error in language prediction: {e}")
+
+        # 回退到使用Python接口，处理numpy 2.0兼容性
+        try:
+            # 使用原始的predict方法，但处理numpy 2.0兼容性问题
+            result = self.model.predict(text, k=1)
+            if isinstance(result, tuple) and len(result) == 2:
+                labels, probs = result
+                if labels and len(labels) > 0:
+                    # 处理probs，确保它是一个numpy数组或列表
+                    if hasattr(probs, "__getitem__") and len(probs) > 0:
+                        return labels[0], float(probs[0])
+        except Exception as e:
+            self.logger.error(f"Error in fallback language prediction: {e}")
+
+        return ("__label__unknown", 0.0)
 
     def keep(self, text: str) -> tuple[bool, str, float]:
         """Returns (keep, lang_label, score)"""
