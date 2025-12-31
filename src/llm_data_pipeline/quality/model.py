@@ -6,11 +6,12 @@ import fasttext
 import fasttext.FastText
 import fasttext.FastText as FastText_module
 import numpy as np
+from fasttext.FastText import _FastText
 
 from llm_data_pipeline.core import PipelineLogger
 
 # 保存原始的check函数
-original_check = None
+original_check: callable[[str], str] = None  # type: ignore[assignment]
 for item in dir(FastText_module):
     if item == "check":
         original_check = getattr(FastText_module, item)
@@ -19,7 +20,7 @@ for item in dir(FastText_module):
 # 如果没有找到原始check函数，定义一个简单的
 if original_check is None:
 
-    def original_check(entry):
+    def original_check(entry: str) -> str:
         if entry.find("\n") != -1:
             raise ValueError("predict processes one line at a time (remove '\n')")
         return entry + "\n"
@@ -41,7 +42,7 @@ def fixed_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
         if isinstance(results, tuple) and len(results) == 2:
             # 格式：(all_labels, all_probs)
             labels_list, probs_list = results
-            for labels, probs in zip(labels_list, probs_list):
+            for labels, probs in zip(labels_list, probs_list, strict=True):
                 all_labels.append(labels)
                 all_probs.append([float(p) for p in probs])
         else:
@@ -95,8 +96,6 @@ def fixed_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
 
 
 # 应用补丁到_FastText类
-from fasttext.FastText import _FastText
-
 _FastText.predict = fixed_predict
 
 
@@ -264,10 +263,10 @@ class LanguageFilter:
     threshold: float = 0.4
 
     def __post_init__(self) -> None:
-        # Use regular logging instead of PipelineLogger to avoid issues in Ray actors
-        import logging
+        # Use actor logger for Ray compatibility
+        from llm_data_pipeline.core import get_actor_logger
 
-        self.logger = logging.getLogger("llm_data_pipeline.quality")
+        self.logger = get_actor_logger("llm_data_pipeline.quality")
 
         self.logger.info(f"Loading fastText LID model: {self.model_path}")
         self.model = fasttext.load_model(self.model_path)

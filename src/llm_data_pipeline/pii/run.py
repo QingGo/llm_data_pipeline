@@ -6,20 +6,18 @@ from dataclasses import dataclass
 import pyarrow as pa
 import pyarrow.compute as pc
 import ray.data as rd
-from ray.data import ActorPoolStrategy
 import spacy
 from presidio_analyzer import AnalyzerEngine
 from presidio_analyzer.nlp_engine import NlpEngineProvider
 from presidio_anonymizer import AnonymizerEngine
 from presidio_anonymizer.entities import OperatorConfig
+from ray.data import ActorPoolStrategy
 
 from llm_data_pipeline.core import (
     PipelineConfig,
     PipelineLogger,
-    resolve_io_paths,
     run_step_entrypoint,
-    validate_input_path,
-    write_parquet,
+    step_wrapper,
 )
 
 # -------------------------
@@ -427,7 +425,7 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
 
         # 4) Merge back
         logger.info("PII: Merging datasets")
-        ds_out = ds_no.union(ds_ner)
+        ds_out = ds_no.union([ds_ner])
     else:
         logger.info("PII: NER disabled, skipping NER processing")
         ds_out = ds
@@ -449,8 +447,6 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
 
 def run_pii(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point for PII redaction"""
-    from llm_data_pipeline.core import step_wrapper
-    
     stats = step_wrapper(
         step_name="pii",
         process_func=_process_pii,

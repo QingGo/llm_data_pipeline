@@ -62,13 +62,19 @@ class PipelineConfig:
 
 
 class PipelineLogger:
-    """Singleton logger for the pipeline."""
+    """Singleton logger for the pipeline.
+    
+    For Ray actors, use the get_actor_logger() function instead.
+    """
 
     _instance: logging.Logger | None = None
 
     @classmethod
     def get(cls) -> logging.Logger:
-        """Gets the singleton logger instance."""
+        """Gets the singleton logger instance.
+        
+        Use this in regular code, but not in Ray actors.
+        """
         if cls._instance is None:
             raise RuntimeError("Logger not initialized. Call setup_logging first.")
         return cls._instance
@@ -119,6 +125,41 @@ def setup_logging(output_dir: Path, step_name: str = "Pipeline") -> logging.Logg
 
     logger.info(f"Logging to {log_file}")
     PipelineLogger.set(logger)
+    return logger
+
+
+def get_actor_logger(name: str = "llm_data_pipeline.actor") -> logging.Logger:
+    """
+    Get a logger suitable for use in Ray actors.
+    
+    This logger writes to the same file as the main pipeline logger but uses
+    a separate logger instance that works correctly in distributed environments.
+    
+    Args:
+        name: Logger name prefix
+    
+    Returns:
+        A properly configured logger for use in Ray actors
+    """
+    import logging
+    
+    logger = logging.getLogger(name)
+    logger.setLevel(logging.INFO)
+    
+    # Clear any existing handlers to avoid duplicates
+    logger.handlers.clear()
+    logger.propagate = False
+    
+    # Add only file handler from root logger
+    root_file_handler = None
+    for h in logging.getLogger().handlers:
+        if isinstance(h, logging.FileHandler):
+            root_file_handler = h
+            break
+    
+    if root_file_handler:
+        logger.addHandler(root_file_handler)
+    
     return logger
 
 
@@ -343,64 +384,112 @@ def step_wrapper(
         
     Returns:
         Comprehensive statistics dictionary including input/output stats, counts, and durations
+    
+    Raises:
+        Exception: If any error occurs during step execution, with detailed context
     """
     logger = PipelineLogger.get()
     total_start = time.time()
     
-    logger.info(f"{step_name}: Starting {step_name} processing")
-    
-    # 1. Resolve paths
-    logger.info(f"{step_name}: Resolving paths")
-    input_path, output_dir = resolve_io_paths(config, step_name, input_step_name)
-    output_subdir = output_subdir or f"{step_name}_parquet"
-    output_path = output_dir / output_subdir
-    
-    # 2. Validate input path
-    logger.info(f"{step_name}: Validating input path: {input_path}")
-    validate_input_path(input_path, step_name)
-    
-    # 3. Read data with input stats
-    logger.info(f"{step_name}: Reading parquet data")
-    ds, (input_file_count, input_total_size) = read_parquet(input_path, config)
-    input_count = ds.count()
-    logger.info(f"{step_name}: Input stats - files: {input_file_count}, size: {input_total_size:,} bytes, records: {input_count}")
-    
-    # 4. Core processing
-    logger.info(f"{step_name}: Starting core processing")
-    process_start = time.time()
-    ds_out = process_func(ds, config, **kwargs)
-    process_end = time.time()
-    logger.info(f"{step_name}: Core processing completed in {process_end - process_start:.2f} seconds")
-    
-    # 5. Write output with output stats
-    logger.info(f"{step_name}: Writing output")
-    output_count = ds_out.count()  # Get count first to avoid duplicate computation
-    output_file_count, output_total_size = write_parquet(ds_out, output_path, logger)
-    logger.info(f"{step_name}: Output stats - files: {output_file_count}, size: {output_total_size:,} bytes, records: {output_count}")
-    
-    # 6. Calculate total duration and prepare stats
-    total_end = time.time()
-    total_duration = total_end - total_start
-    
-    stats = {
+    stats: dict[str, Any] = {
         "step_name": step_name,
-        "input_path": str(input_path),
-        "input_file_count": input_file_count,
-        "input_total_size": input_total_size,
-        "input_count": input_count,
-        "output_path": str(output_path),
-        "output_file_count": output_file_count,
-        "output_total_size": output_total_size,
-        "output_count": output_count,
-        "duration_seconds": total_duration,
-        "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
-        "process_duration_seconds": process_end - process_start,
+        "input_path": "",
+        "output_path": "",
+        "status": "failed",
     }
     
-    logger.info(f"{step_name}: Processing completed in {total_duration:.2f} seconds")
-    logger.info(f"{step_name}: Final stats: {stats}")
-    
-    return stats
+    try:
+        logger.info(f"{step_name}: Starting {step_name} processing")
+        
+        # 1. Resolve paths
+        logger.info(f"{step_name}: Resolving paths")
+        try:
+            input_path, output_dir = resolve_io_paths(config, step_name, input_step_name)
+            output_subdir = output_subdir or f"{step_name}_parquet"
+            output_path = output_dir / output_subdir
+            stats["input_path"] = str(input_path)
+            stats["output_path"] = str(output_path)
+        except Exception as e:
+            logger.error(f"{step_name}: Path resolution failed: {e}")
+            raise RuntimeError(f"{step_name}: Failed to resolve input/output paths: {e}") from e
+        
+        # 2. Validate input path
+        logger.info(f"{step_name}: Validating input path: {input_path}")
+        try:
+            validate_input_path(input_path, step_name)
+        except Exception as e:
+            logger.error(f"{step_name}: Input validation failed: {e}")
+            raise RuntimeError(f"{step_name}: Input path validation failed: {e}") from e
+        
+        # 3. Read data with input stats
+        logger.info(f"{step_name}: Reading parquet data")
+        try:
+            ds, (input_file_count, input_total_size) = read_parquet(input_path, config)
+            input_count = ds.count()
+            logger.info(
+                f"{step_name}: Input stats - files: {input_file_count}, size: {input_total_size:,} bytes, "
+                f"records: {input_count}"
+            )
+        except Exception as e:
+            logger.error(f"{step_name}: Data reading failed: {e}")
+            raise RuntimeError(f"{step_name}: Failed to read input data: {e}") from e
+        
+        # 4. Core processing
+        logger.info(f"{step_name}: Starting core processing")
+        process_start = time.time()
+        try:
+            ds_out = process_func(ds, config, **kwargs)
+            process_end = time.time()
+            logger.info(f"{step_name}: Core processing completed in {process_end - process_start:.2f} seconds")
+        except Exception as e:
+            logger.error(f"{step_name}: Core processing failed: {e}", exc_info=True)
+            raise RuntimeError(f"{step_name}: Core processing failed: {e}") from e
+        
+        # 5. Write output with output stats
+        logger.info(f"{step_name}: Writing output")
+        try:
+            output_count = ds_out.count()  # Get count first to avoid duplicate computation
+            output_file_count, output_total_size = write_parquet(ds_out, output_path, logger)
+            logger.info(
+                f"{step_name}: Output stats - files: {output_file_count}, size: {output_total_size:,} bytes, "
+                f"records: {output_count}"
+            )
+        except Exception as e:
+            logger.error(f"{step_name}: Output writing failed: {e}", exc_info=True)
+            raise RuntimeError(f"{step_name}: Failed to write output data: {e}") from e
+        
+        # 6. Calculate total duration and prepare stats
+        total_end = time.time()
+        total_duration = total_end - total_start
+        
+        stats.update({
+            "input_file_count": input_file_count,
+            "input_total_size": input_total_size,
+            "input_count": input_count,
+            "output_file_count": output_file_count,
+            "output_total_size": output_total_size,
+            "output_count": output_count,
+            "duration_seconds": total_duration,
+            "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+            "process_duration_seconds": process_end - process_start,
+            "status": "success",
+        })
+        
+        logger.info(f"{step_name}: Processing completed in {total_duration:.2f} seconds")
+        logger.info(f"{step_name}: Final stats: {stats}")
+        
+        return stats
+    except Exception as e:
+        # Ensure we have duration in stats even if step fails
+        total_end = time.time()
+        total_duration = total_end - total_start
+        stats.update({
+            "duration_seconds": total_duration,
+            "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+            "error": str(e),
+        })
+        logger.error(f"{step_name}: Step failed with stats: {stats}")
+        raise
 
 
 def run_step(
@@ -480,7 +569,7 @@ def run_step_entrypoint(
 
     # Initialize Ray if enabled
     if use_ray:
-        init_ray(config.ray_address, logger)
+        init_ray(config.ray_address or "auto", logger)
 
     try:
         # Execute the step function with config and all parsed arguments

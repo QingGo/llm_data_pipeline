@@ -6,10 +6,7 @@ import ray.data as rd
 from llm_data_pipeline.core import (
     PipelineConfig,
     PipelineLogger,
-    resolve_io_paths,
     run_step_entrypoint,
-    validate_input_path,
-    write_parquet,
 )
 from llm_data_pipeline.dedup.dedup import ray_global_dedup
 
@@ -26,7 +23,7 @@ def _process_clustering(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.
     rows_per_band = getattr(config, "rows_per_band", kwargs.get("rows_per_band", 4))
     
     # Check if dataset has required 'signature' column
-    dataset_columns = ds.columns()
+    dataset_columns = ds.columns() or []
     if "signature" not in dataset_columns:
         if "minhash_sig" in dataset_columns:
             logger.warning(
@@ -78,8 +75,14 @@ def run_clustering(config: PipelineConfig, **kwargs) -> dict:
     if manual_input:
         # If manual input is provided, we need to handle it specially
         # since step_wrapper expects input_step_name
-        from llm_data_pipeline.core import read_parquet, resolve_io_paths, validate_input_path, write_parquet, get_directory_stats
         import time
+
+        from llm_data_pipeline.core import (
+            read_parquet,
+            resolve_io_paths,
+            validate_input_path,
+            write_parquet,
+        )
         
         total_start = time.time()
         input_path = Path(manual_input)
@@ -140,7 +143,10 @@ def run_clustering(config: PipelineConfig, **kwargs) -> dict:
             "input_docs": stats["input_count"],
             "kept_docs": stats["output_count"],
             "removed_docs": stats["input_count"] - stats["output_count"],
-            "dedup_rate": (stats["input_count"] - stats["output_count"]) / stats["input_count"] if stats["input_count"] > 0 else 0.0,
+            "dedup_rate": (
+                (stats["input_count"] - stats["output_count"]) / stats["input_count"] 
+                if stats["input_count"] > 0 else 0.0
+            ),
         })
         
         return stats

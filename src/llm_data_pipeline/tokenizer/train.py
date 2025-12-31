@@ -73,11 +73,10 @@ def train_sentencepiece_py(
     model_type: str,
     character_coverage: float,
 ):
-    import io
     import os
-    import sys
     import tempfile
     from contextlib import contextmanager
+
     from llm_data_pipeline.core import PipelineLogger
     
     logger = PipelineLogger.get()
@@ -148,9 +147,9 @@ def train_sentencepiece_py(
             spm.SentencePieceTrainer.Train(**kwargs)
         
         # Read captured output from temporary files
-        with open(stdout_path, 'r') as f:
+        with open(stdout_path) as f:
             stdout_output = f.read()
-        with open(stderr_path, 'r') as f:
+        with open(stderr_path) as f:
             stderr_output = f.read()
         
         # Clean up temporary files
@@ -196,13 +195,15 @@ def train_sentencepiece_py(
                     if not stripped_line or stripped_line in ["{", "}", ":"]:
                         continue
                     # Only log actual warnings and errors (lines containing .cc( and LOG(WARNING) or LOG(ERROR))
-                    if (".cc(" in stripped_line or ".cpp(" in stripped_line) and ("LOG(WARNING)" in stripped_line or "LOG(ERROR)" in stripped_line):
+                    has_cc_file = ".cc(" in stripped_line or ".cpp(" in stripped_line
+                    has_log = "LOG(WARNING)" in stripped_line or "LOG(ERROR)" in stripped_line
+                    if has_cc_file and has_log:
                         logger.warning(f"SentencePiece stderr: {stripped_line}")
     except Exception as e:
         logger.error(f"SentencePiece training failed: {e}")
         raise
     
-    logger.info(f"SentencePiece training completed successfully")
+    logger.info("SentencePiece training completed successfully")
 
 
 def compare_token_lengths(spm_model_path: Path, text: str):

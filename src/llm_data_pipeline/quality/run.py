@@ -7,11 +7,9 @@ from ray.data import ActorPoolStrategy
 from llm_data_pipeline.core import (
     PipelineConfig,
     PipelineLogger,
-    resolve_io_paths,
     run_step_entrypoint,
-    validate_input_path,
+    step_wrapper,
     validate_model_path,
-    write_parquet,
 )
 from llm_data_pipeline.quality.model import LanguageFilter
 
@@ -71,7 +69,7 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
             return row
 
     logger.info("Starting language detection and scoring...")
-    ds_scored = ds.map(QualityMapper, compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4))
+    ds_scored = ds.map(QualityMapper(), compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4))
 
     # Log language detection statistics
     logger.info("Language detection completed. Calculating statistics...")
@@ -108,7 +106,8 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
         logger.info("Examples of rejected docs:")
         for i, doc in enumerate(rejected_sample):
             logger.info(
-                f"  Rejected {i + 1}: lang={doc['lang']}, score={doc['lang_score']:.4f}, text_start={doc['text'][:50]}..."
+                f"  Rejected {i + 1}: lang={doc['lang']}, score={doc['lang_score']:.4f}, "
+                f"text_start={doc['text'][:50]}..."
             )
 
     return ds_kept
@@ -116,8 +115,6 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
 
 def run_quality(config: PipelineConfig, **kwargs) -> dict:
     """Quality filtering step"""
-    from llm_data_pipeline.core import step_wrapper
-    
     stats = step_wrapper(
         step_name="quality",
         process_func=_process_quality,

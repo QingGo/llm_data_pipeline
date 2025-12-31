@@ -18,3 +18,5 @@ models/*
 llama3_tokenizer/
 *.log
 .trae
+.coverage
+docs/project_analysis.md

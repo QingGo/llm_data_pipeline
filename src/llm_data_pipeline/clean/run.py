@@ -31,8 +31,6 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 def _process_clean(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> tuple[rd.Dataset, rd.Dataset]:
     """Core cleaning processing function"""
-    logger = PipelineLogger.get()
-    
     rules = CleanRules(
         min_chars=kwargs.get("min_chars", 200),
         max_chars=kwargs.get("max_chars", 200_000),
@@ -58,7 +56,7 @@ def _process_clean(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> tuple[rd
 
 def run_clean(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point for cleaning"""
-    from llm_data_pipeline.core import step_wrapper, read_parquet, resolve_io_paths, validate_input_path, write_parquet
+    from llm_data_pipeline.core import read_parquet
     logger = PipelineLogger.get()
     import time
     

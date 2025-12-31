@@ -2,8 +2,8 @@ import argparse
 import glob
 import json
 import os
-from pathlib import Path
 from collections.abc import Iterable, Iterator
+from pathlib import Path
 from typing import Any
 
 import numpy as np
@@ -397,7 +397,7 @@ def _process_tokenize(input_path: str, output_path: str, config: PipelineConfig,
 
 def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     """Tokenize and pack step"""
-    from llm_data_pipeline.core import resolve_io_paths, validate_input_path, get_directory_stats
+    from llm_data_pipeline.core import get_directory_stats, validate_input_path
     logger = PipelineLogger.get()
     import time
     

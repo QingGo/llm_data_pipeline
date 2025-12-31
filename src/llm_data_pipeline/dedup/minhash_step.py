@@ -7,10 +7,8 @@ from ray.data import ActorPoolStrategy
 from llm_data_pipeline.core import (
     PipelineConfig,
     PipelineLogger,
-    resolve_io_paths,
     run_step_entrypoint,
-    validate_input_path,
-    write_parquet,
+    step_wrapper,
 )
 from llm_data_pipeline.dedup.minhash import VectorizedMinHash
 
@@ -61,7 +59,7 @@ def _process_minhash(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
     batch_size = config.batch_size
 
     ds_sig = ds.map_batches(
-        MinHashCompute,
+        MinHashCompute(),
         batch_size=batch_size,
         compute=ActorPoolStrategy(size=concurrency),
     )
@@ -71,8 +69,6 @@ def _process_minhash(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
 
 def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     """Computes MinHash signatures for dedup."""
-    from llm_data_pipeline.core import step_wrapper
-    
     stats = step_wrapper(
         step_name="minhash",
         process_func=_process_minhash,

@@ -1,9 +1,9 @@
-import hashlib
 import random
 import re
 from collections.abc import Iterable, Sequence
 
 import numpy as np
+import xxhash
 from datasketch import MinHash
 
 # --------- 1) normalize + shingling ---------
@@ -31,8 +31,8 @@ def char_ngrams(text: str, n: int = 5) -> set[bytes]:
 
 
 def hash64(data: bytes) -> int:
-    # 64-bit stable hash
-    return int.from_bytes(hashlib.blake2b(data, digest_size=8).digest(), "little", signed=False)
+    # 64-bit stable hash using xxhash, which is much faster than blake2b for our use case
+    return xxhash.xxh64_intdigest(data)
 
 
 # --------- 3) MinHash core ---------
@@ -83,62 +83,91 @@ def datasketch_minhash(shingles: Iterable[bytes], k: int = 128) -> MinHash:
 
 
 class VectorizedMinHash:
-    def __init__(self, k: int = 128, seed: int = 42):
+    def __init__(self, k: int = 128, seed: int = 42, ngram_size: int = 5):
         self.k = k
         self.seed = seed
+        self.ngram_size = ngram_size
         # Using native uint64 arithmetic (modulo 2**64)
         self._init_perms()
 
     def _init_perms(self):
+        """Initialize permutation parameters (a, b) for MinHash."""
         rng = np.random.RandomState(self.seed)
+        
         # Generate k pairs of (a, b) over full uint64 range
-        # We perform everything in uint64.
         # a should be odd to ensure it's coprime with 2^64 (which is power of 2)
-        # numpy's randint with dtype=uint64 and large bounds can be tricky with legacy RandomState.
-        # A simple way to get full 64-bit entropy:
-        self.a = rng.randint(1, 2**62, size=self.k, dtype=np.uint64) * 4 + 1  # Ensure odd and spread
-        # Actually proper way:
-        # self.a = rng.bytes(self.k * 8) ...
-        # But randint(1, 2**64...) might fail on some numpy versions.
-        # Let's stick to safe large range that fits in int64 for generation, key is type is uint64 for calc.
-        # Or just use two 32-bit generations combined.
-        # For simplicity and speed let's just use high range available to randint.
-
-        # Using 2**63-1 is safe for signed int64 inputs to randint, then cast to uint64
-        a_base = rng.randint(1, 2**63 - 1, size=self.k, dtype=np.int64).astype(np.uint64)
-        self.a = a_base | np.uint64(1)  # Ensure odd
-
-        self.b = rng.randint(0, 2**63 - 1, size=self.k, dtype=np.int64).astype(np.uint64)
+        
+        # Efficiently generate full 64-bit random numbers
+        # Use two 32-bit integers combined for better compatibility across numpy versions
+        # This approach ensures we get full 64-bit entropy without issues on older numpy versions
+        
+        # Generate high and low 32-bit parts separately
+        a_high = rng.randint(0, 2**32, size=self.k, dtype=np.uint64)
+        a_low = rng.randint(0, 2**32, size=self.k, dtype=np.uint64)
+        
+        # Combine into 64-bit numbers and ensure a is odd
+        self.a = (a_high << 32) | a_low
+        self.a |= np.uint64(1)  # Ensure odd
+        
+        # Generate b similarly
+        b_high = rng.randint(0, 2**32, size=self.k, dtype=np.uint64)
+        b_low = rng.randint(0, 2**32, size=self.k, dtype=np.uint64)
+        self.b = (b_high << 32) | b_low
 
     def compute_signature(self, text: str) -> list[int]:
-        shingles_set = char_ngrams(text, n=5)
-        if not shingles_set:
-            # Empty text case
+        """Compute MinHash signature for a single text."""
+        shingles = char_ngrams(text, n=self.ngram_size)
+        
+        # Handle empty text case - when text is empty, char_ngrams returns {b""}
+        if len(shingles) == 1 and b"" in shingles:
+            # Empty text case - return all zeros signature
             return [0] * self.k
 
-        # 1. Provide stable hash for each shingle
-        # map bytes -> u64
-        hashes = [hash64(s) for s in shingles_set]
+        # 1. Generate stable hashes for all shingles
+        # Using list comprehension for efficiency
+        hashes = [xxhash.xxh64_intdigest(s) for s in shingles]
+        
+        # Early exit for texts with only one shingle
+        if len(hashes) == 1:
+            # Only one shingle, so just compute the permutations on it
+            h = hashes[0]
+            sigs = [(h * a + b) for a, b in zip(self.a, self.b, strict=True)]
+            return sigs
 
-        # Convert to numpy array (N,)
+        # 2. Convert to numpy array for vectorized computation
         H = np.array(hashes, dtype=np.uint64)
-
-        # 2. Vectorized Permutation
-        # H shape: (N,)
-        # a, b shape: (K,)
-        # Broadcast: (N, 1) * (K,) + (K,) -> (N, K)
-        # Native uint64 arithmetic wraps around 2^64 (modulo 2^64)
-
-        # M = (H * a + b)
-        # We need reshaping for broadcast
-
-        # (N, 1) * (K,) -> (N, K)
-        M = H.reshape(-1, 1) * self.a + self.b
-
-        # 3. Min over columns (axis=0) -> (K,)
-        sigs = M.min(axis=0)
-
+        
+        # 3. Vectorized permutation and min calculation
+        # Optimize memory usage by using smaller data types when possible
+        # and leveraging numpy's built-in optimized functions
+        
+        # Reshape for broadcasting
+        H_reshaped = H.reshape(-1, 1)
+        
+        # Compute all permutations in one vectorized operation
+        # M shape: (N, K)
+        M = H_reshaped * self.a + self.b
+        
+        # Compute minimum over each column (axis=0) to get the signature
+        # M is already uint64, so result will be uint64
+        sigs = np.min(M, axis=0)
+        
         return sigs.tolist()
+        
+    def batch_compute_signature(self, texts: list[str]) -> list[list[int]]:
+        """Compute MinHash signatures for multiple texts efficiently in batch.
+        
+        Args:
+            texts: List of texts to compute signatures for
+            
+        Returns:
+            List of MinHash signatures, one for each text
+        """
+        signatures = []
+        for text in texts:
+            sig = self.compute_signature(text)
+            signatures.append(sig)
+        return signatures
 
 
 if __name__ == "__main__":

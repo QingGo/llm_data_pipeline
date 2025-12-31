@@ -147,7 +147,7 @@ def ray_global_dedup(
 
     # 每个 doc -> root
     # Check available columns and select only existing ones
-    available_cols = docs_ds.columns()
+    available_cols = docs_ds.columns() or []
     select_cols = ["doc_id", "length"]
     if "ts" in available_cols:
         select_cols.append("ts")
