@@ -142,6 +142,9 @@ def compare_token_lengths(spm_model_path: Path, text: str):
 def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
     """Train tokenizer step"""
     logger = PipelineLogger.get()
+    import time
+    total_start = time.time()
+    
     input_path_base, output_dir_base = resolve_io_paths(config, "train_tokenizer", "quality")
 
     def get_arg(name, default=None):
@@ -177,6 +180,7 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
     )
 
     print("Step 1) Write text shards from parquet...")
+    process_start = time.time()
     txt_paths = write_shards_with_ray(
         parquet_dir=input_path,
         out_dir=shard_dir,
@@ -195,15 +199,46 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
         model_type=model_type,
         character_coverage=character_coverage,
     )
+    process_end = time.time()
 
     spm_model_path = Path(str(model_prefix) + ".model")
     logger.info("Step 3) Compare token lengths...")
-    stats = compare_token_lengths(
+    token_stats = compare_token_lengths(
         spm_model_path=spm_model_path,
         text=sample_text,
     )
+    total_end = time.time()
 
-    stats["model_path"] = str(spm_model_path)
+    # Get input and output stats
+    from llm_data_pipeline.core import get_directory_stats
+    input_file_count, input_total_size = get_directory_stats(input_path)
+    output_file_count = 2  # model and vocab file
+    
+    # Calculate output total size
+    model_size = spm_model_path.stat().st_size if spm_model_path.exists() else 0
+    vocab_path = Path(str(model_prefix) + ".vocab")
+    vocab_size_bytes = vocab_path.stat().st_size if vocab_path.exists() else 0
+    output_total_size = model_size + vocab_size_bytes
+
+    # Prepare comprehensive stats in the same format as other steps
+    stats = {
+        "step_name": "train_tokenizer",
+        "input_path": str(input_path),
+        "input_file_count": input_file_count,
+        "input_total_size": input_total_size,
+        "input_count": 0,  # Train tokenizer doesn't count input records
+        "output_path": str(model_prefix.parent),
+        "output_file_count": output_file_count,
+        "output_total_size": output_total_size,
+        "output_count": 0,  # Train tokenizer doesn't produce output records
+        "model_path": str(spm_model_path),
+        "duration_seconds": total_end - total_start,
+        "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_end - total_start)),
+        "process_duration_seconds": process_end - process_start,
+        # Add tokenizer-specific stats
+        **token_stats
+    }
+
     return stats
 
 

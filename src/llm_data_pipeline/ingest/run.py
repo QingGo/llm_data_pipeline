@@ -44,6 +44,9 @@ def add_args(p: argparse.ArgumentParser) -> None:
 def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point"""
     logger = PipelineLogger.get()
+    import time
+
+    total_start = time.time()
 
     # map args
     data_dir = Path(kwargs.get("data_dir", "./data/commoncrawl/"))
@@ -72,8 +75,25 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
 
     if not files:
         logger.warning(f"No files found in {data_dir} with pattern {pattern}")
-        return {"files_processed": 0, "docs_ingested": 0, "output_path": str(output_path)}
+        total_duration = time.time() - total_start
+        return {
+            "step_name": "ingest",
+            "input_path": str(data_dir),
+            "input_file_count": 0,
+            "input_total_size": 0,
+            "input_count": 0,
+            "output_path": str(output_path),
+            "output_file_count": 0,
+            "output_total_size": 0,
+            "output_count": 0,
+            "files_processed": 0,
+            "docs_ingested": 0,
+            "duration_seconds": total_duration,
+            "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+            "process_duration_seconds": 0,
+        }
 
+    process_start = time.time()
     # dataset from items
     ds_files = rd.from_items([{"path": str(p.absolute())} for p in files])
 
@@ -94,8 +114,32 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     doc_count = ds_docs.count()
     logger.info(f"files = {len(files)}")
     logger.info(f"docs_count = {doc_count}")
+    process_end = time.time()
+    total_end = time.time()
 
-    return {"files_processed": len(files), "docs_ingested": doc_count, "output_path": str(output_path)}
+    # Get output stats
+    from llm_data_pipeline.core import get_directory_stats
+    output_file_count, output_total_size = get_directory_stats(output_path)
+
+    # Prepare comprehensive stats in the same format as other steps
+    stats = {
+        "step_name": "ingest",
+        "input_path": str(data_dir),
+        "input_file_count": len(files),
+        "input_total_size": 0,  # Ingest stage doesn't have input parquet files
+        "input_count": 0,        # Ingest stage doesn't have input records
+        "output_path": str(output_path),
+        "output_file_count": output_file_count,
+        "output_total_size": output_total_size,
+        "output_count": doc_count,
+        "files_processed": len(files),  # Keep for backward compatibility
+        "docs_ingested": doc_count,     # Keep for backward compatibility
+        "duration_seconds": total_end - total_start,
+        "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_end - total_start)),
+        "process_duration_seconds": process_end - process_start,
+    }
+
+    return stats
 
 
 def main() -> None:

@@ -6,7 +6,7 @@ readme = "README.md"
 authors = [
     { name = "QingGo", email = "zyqingjohn@qq.com" }
 ]
-requires-python = ">=3.12"
+requires-python = ">=3.12,<3.13"
 dependencies = [
     "datasets>=4.4.2",
     "datasketch>=1.8.0",
@@ -23,7 +23,15 @@ dependencies = [
     "transformers>=4.57.3",
     "warcio>=1.7.5",
     "xxhash>=3.6.0",
+    "spacy==3.8.11",
+    "en-core-web-sm==3.8.0",
+    "zh-core-web-sm==3.8.0"
 ]
+
+[tool.uv.sources]
+# 强制从官方 release wheel 安装，绕开 PyPI 上的 zh_core_web_sm stub 包
+"en-core-web-sm" = { url = "https://github.com/explosion/spacy-models/releases/download/en_core_web_sm-3.8.0/en_core_web_sm-3.8.0-py3-none-any.whl" }
+"zh-core-web-sm" = { url = "https://github.com/explosion/spacy-models/releases/download/zh_core_web_sm-3.8.0/zh_core_web_sm-3.8.0-py3-none-any.whl" }
 
 [project.scripts]
 llm-data-pipeline = "llm_data_pipeline:main"
@@ -33,6 +41,7 @@ requires = ["uv_build>=0.8.17,<0.9.0"]
 build-backend = "uv_build"
 
 [dependency-groups]
+# 让 python -m pip 可用（解决 No module named pip）
 dev = [
     "isort>=7.0.0",
     "modelscope>=1.33.0",
@@ -40,6 +49,7 @@ dev = [
     "pytest>=9.0.2",
     "pytest-cov>=7.0.0",
     "ruff>=0.14.9",
+    "pip"
 ]
 
 [tool.ruff]

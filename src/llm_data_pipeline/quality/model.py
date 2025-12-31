@@ -1,50 +1,103 @@
 from dataclasses import dataclass
 
+# 修复fasttext的numpy 2.0兼容性问题
+# 解决方案：直接替换fasttext模块中的predict方法实现
 import fasttext
 import fasttext.FastText
+import fasttext.FastText as FastText_module
 import numpy as np
 
 from llm_data_pipeline.core import PipelineLogger
 
+# 保存原始的check函数
+original_check = None
+for item in dir(FastText_module):
+    if item == "check":
+        original_check = getattr(FastText_module, item)
+        break
 
-# Monkey patch fasttext to fix numpy 2.0 compatibility
-# fasttext 0.9.3 uses np.array(probs, copy=False) which fails in numpy 2.0
-# when the array needs to be copied (e.g. from list).
-# We replace the predict method with a fixed version using np.asarray.
-def _patched_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
-    def check(entry: str) -> str:
+# 如果没有找到原始check函数，定义一个简单的
+if original_check is None:
+
+    def original_check(entry):
         if entry.find("\n") != -1:
             raise ValueError("predict processes one line at a time (remove '\n')")
         return entry + "\n"
 
-    # batch
+
+# 重新实现FastText._FastText.predict方法
+def fixed_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
+    """Fixed predict method that returns simple lists instead of numpy arrays"""
     if isinstance(text, list):
-        text = [check(t) for t in text]
-        all_labels, all_probs = self.f.multilinePredict(text, k, threshold, on_unicode_error)
-        # all_probs 可能是 list-of-lists，别强行 np.asarray 成 ragged ndarray
-        all_probs = [np.asarray(p, dtype=np.float32) for p in all_probs]
+        # 批量处理 - 使用FastText的multilinePredict方法
+        texts = [original_check(t) for t in text]
+        all_labels = []
+        all_probs = []
+
+        # 调用multilinePredict方法
+        results = self.f.multilinePredict(texts, k, threshold, on_unicode_error)
+
+        # 处理返回结果
+        if isinstance(results, tuple) and len(results) == 2:
+            # 格式：(all_labels, all_probs)
+            labels_list, probs_list = results
+            for labels, probs in zip(labels_list, probs_list):
+                all_labels.append(labels)
+                all_probs.append([float(p) for p in probs])
+        else:
+            # 处理单个结果的情况
+            for result in results:
+                if isinstance(result, tuple) and len(result) == 2:
+                    # 格式：(labels, probs)
+                    labels, probs = result
+                    all_labels.append(labels)
+                    all_probs.append([float(p) for p in probs])
+                elif isinstance(result, tuple) and len(result) == 1:
+                    # 格式：((prob, label),)
+                    prob_label_pairs = result[0]
+                    labels = []
+                    probs = []
+                    for prob, label in prob_label_pairs:
+                        labels.append(label)
+                        probs.append(float(prob))
+                    all_labels.append(labels)
+                    all_probs.append(probs)
+
         return all_labels, all_probs
-
-    # single string
-    text = check(text)
-    # fasttext's predict method returns a tuple of lists: (labels, probs)
-    # where labels is a list of strings like ['__label__en']
-    # and probs is a list of floats like [0.98]
-    result = self.f.predict(text, k, threshold, on_unicode_error)
-
-    # Handle different return formats based on fasttext version
-    if isinstance(result, tuple) and len(result) == 2:
-        # Format: (labels, probs)
-        labels, probs = result
     else:
-        # Fallback for unexpected formats
+        # 单个文本处理
+        text = original_check(text)
+
+        # 调用predict方法
+        result = self.f.predict(text, k, threshold, on_unicode_error)
+
         labels = []
         probs = []
 
-    return labels, np.asarray(probs, dtype=np.float32) if probs else np.array([], dtype=np.float32)
+        if isinstance(result, tuple):
+            if len(result) == 2:
+                # 格式：(labels, probs)
+                labels, probs = result
+                probs = [float(p) for p in probs]
+            elif len(result) == 1:
+                # 格式：((prob, label),)
+                prob_label_pairs = result[0]
+                for prob, label in prob_label_pairs:
+                    labels.append(label)
+                    probs.append(float(prob))
+        elif isinstance(result, list):
+            # 格式：[(prob, label)]
+            for prob, label in result:
+                labels.append(label)
+                probs.append(float(prob))
+
+        return labels, probs
 
 
-fasttext.FastText._FastText.predict = _patched_predict
+# 应用补丁到_FastText类
+from fasttext.FastText import _FastText
+
+_FastText.predict = fixed_predict
 
 
 @dataclass
@@ -235,32 +288,40 @@ class LanguageFilter:
         if not text:
             return ("__label__unknown", 0.0)
 
-        # 确保文本以换行符结尾，这是fasttext模型的要求
-        text_with_newline = text + "\n"
-
         try:
-            # 直接调用C++接口，使用正确的参数顺序
-            result = self.model.f.predict(text_with_newline, 1, 0.0, "strict")
+            # 直接使用规范化后的文本，不要添加换行符
+            # 经过patch的predict方法会处理换行符要求
+            labels, probs = self.model.predict(text, k=1)
 
-            if result and len(result) > 0:
-                # 结果格式：[(prob, label)]
-                prob, label = result[0]
-                return label, float(prob)
+            # 确保返回值是有效的
+            if isinstance(labels, list) and len(labels) > 0:
+                label = labels[0]
+
+                # 处理probs，兼容不同格式
+                if isinstance(probs, list):
+                    # 列表格式
+                    if probs and len(probs) > 0:
+                        # 检查probs[0]的类型
+                        if isinstance(probs[0], (list, np.ndarray)):
+                            prob = float(probs[0][0])
+                        else:
+                            prob = float(probs[0])
+                    else:
+                        prob = 0.0
+                elif isinstance(probs, np.ndarray):
+                    # numpy数组格式
+                    prob = float(probs[0]) if probs.size > 0 else 0.0
+                else:
+                    # 其他格式
+                    prob = 0.0
+
+                self.logger.debug(f"Predicted language: {label} with probability: {prob:.4f}")
+                return label, prob
         except Exception as e:
             self.logger.error(f"Error in language prediction: {e}")
+            import traceback
 
-        # 回退到使用Python接口，处理numpy 2.0兼容性
-        try:
-            # 使用原始的predict方法，但处理numpy 2.0兼容性问题
-            result = self.model.predict(text, k=1)
-            if isinstance(result, tuple) and len(result) == 2:
-                labels, probs = result
-                if labels and len(labels) > 0:
-                    # 处理probs，确保它是一个numpy数组或列表
-                    if hasattr(probs, "__getitem__") and len(probs) > 0:
-                        return labels[0], float(probs[0])
-        except Exception as e:
-            self.logger.error(f"Error in fallback language prediction: {e}")
+            self.logger.error(f"Traceback: {traceback.format_exc()}")
 
         return ("__label__unknown", 0.0)
 

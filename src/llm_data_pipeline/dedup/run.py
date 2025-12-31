@@ -19,26 +19,12 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--rows-per-band", type=int, default=4)
 
 
-def run_clustering(config: PipelineConfig, **kwargs) -> dict:
-    """Clustering & Dedup Step"""
+def _process_clustering(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
+    """Core clustering processing function"""
     logger = PipelineLogger.get()
-    manual_input = kwargs.get("input")
-    if manual_input:
-        input_path = Path(manual_input)
-        _, output_dir = resolve_io_paths(config, "clustering")
-        logger.info(f"Using manual input path: {input_path}")
-    else:
-        input_path, output_dir = resolve_io_paths(config, "clustering", "minhash")
-
+    
     rows_per_band = getattr(config, "rows_per_band", kwargs.get("rows_per_band", 4))
-
-    validate_input_path(input_path, "clustering")
-
-    logger.info(f"Reading from {input_path}...")
-    ds = rd.read_parquet(str(input_path.absolute()))
-    initial_count = ds.count()
-    logger.info(f"Found {initial_count} docs in input path before applying limit")
-
+    
     # Check if dataset has required 'signature' column
     dataset_columns = ds.columns()
     if "signature" not in dataset_columns:
@@ -56,13 +42,6 @@ def run_clustering(config: PipelineConfig, **kwargs) -> dict:
                 f"Please ensure the 'minhash' step was run before 'clustering' step."
             )
 
-    limit = config.limit
-    if limit > 0:
-        logger.info(f"DEBUG: Limiting clustering input to {limit} records.")
-        ds = ds.limit(limit)
-        limited_count = ds.count()
-        logger.info(f"Input docs after limit: {limited_count}")
-
     logger.info("Running ray_global_dedup logic...")
     result = ray_global_dedup(ds, rows_per_band=rows_per_band)
 
@@ -70,6 +49,8 @@ def run_clustering(config: PipelineConfig, **kwargs) -> dict:
     logger.info(f"Dedup finished. Kept {result['kept_docs']} / {result['total_docs']} docs.")
     logger.info(f"Expected keep count from keep_set: {len(keep_set)}")
 
+    logger.info(f"Dataset columns: {ds.columns()}")
+    logger.info(f"Dataset sample: {ds.take(1)}")
     logger.info(f"Filtering docs with keep_set size: {len(keep_set)}")
 
     # Use Ray Data's built-in filter method which is more reliable
@@ -83,34 +64,86 @@ def run_clustering(config: PipelineConfig, **kwargs) -> dict:
     logger.info(f"Dataset size after filtering: {final_count}")
     if final_count != len(keep_set):
         logger.warning(f"Mismatch: keep_set size {len(keep_set)} vs actual kept docs {final_count}")
+    
+    return ds_final
 
-    out_dir = output_dir / "deduped_parquet"
-    out_dir.mkdir(parents=True, exist_ok=True)
 
-    logger.info(f"Writing deduped data to {out_dir}...")
-    # Use the write_parquet function from core.py
-    write_parquet(ds_final, out_dir, logger)
-
-    # Verify files were written
-    import os
-
-    if os.path.exists(out_dir):
-        files = os.listdir(out_dir)
-        logger.info(f"Found {len(files)} files in {out_dir}")
-        for file in files[:5]:  # Show first 5 files
-            logger.info(f"  - {file}")
+def run_clustering(config: PipelineConfig, **kwargs) -> dict:
+    """Clustering & Dedup Step"""
+    from llm_data_pipeline.core import step_wrapper
+    logger = PipelineLogger.get()
+    
+    # Clustering supports manual input path override
+    manual_input = kwargs.get("input")
+    if manual_input:
+        # If manual input is provided, we need to handle it specially
+        # since step_wrapper expects input_step_name
+        from llm_data_pipeline.core import read_parquet, resolve_io_paths, validate_input_path, write_parquet, get_directory_stats
+        import time
+        
+        total_start = time.time()
+        input_path = Path(manual_input)
+        _, output_dir = resolve_io_paths(config, "clustering")
+        logger.info(f"Using manual input path: {input_path}")
+        
+        # Validate input path
+        validate_input_path(input_path, "clustering")
+        
+        # Read data with stats
+        ds, (input_file_count, input_total_size) = read_parquet(input_path, config)
+        input_count = ds.count()
+        
+        # Core processing
+        ds_out = _process_clustering(ds, config, **kwargs)
+        
+        # Write output with output stats
+        output_path = output_dir / "deduped_parquet"
+        output_file_count, output_total_size = write_parquet(ds_out, output_path, logger)
+        output_count = ds_out.count()
+        
+        # Calculate total duration
+        total_duration = time.time() - total_start
+        
+        # Prepare stats
+        stats = {
+            "step_name": "clustering",
+            "input_path": str(input_path),
+            "input_file_count": input_file_count,
+            "input_total_size": input_total_size,
+            "input_count": input_count,
+            "output_path": str(output_path),
+            "output_file_count": output_file_count,
+            "output_total_size": output_total_size,
+            "output_count": output_count,
+            "duration_seconds": total_duration,
+            "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+            "input_docs": input_count,
+            "kept_docs": output_count,
+            "removed_docs": input_count - output_count,
+            "dedup_rate": (input_count - output_count) / input_count if input_count > 0 else 0.0,
+        }
+        
+        return stats
     else:
-        logger.error(f"Output directory {out_dir} does not exist!")
-
-    logger.info("Done.")
-
-    return {
-        "input_docs": result["total_docs"],
-        "kept_docs": result["kept_docs"],
-        "removed_docs": result["removed_docs"],
-        "dedup_rate": result["dedup_rate"],
-        "output_path": str(out_dir),
-    }
+        # Use standard step_wrapper for normal case
+        stats = step_wrapper(
+            step_name="clustering",
+            process_func=_process_clustering,
+            config=config,
+            input_step_name="minhash",
+            output_subdir="deduped_parquet",
+            **kwargs
+        )
+        
+        # Add clustering-specific stats
+        stats.update({
+            "input_docs": stats["input_count"],
+            "kept_docs": stats["output_count"],
+            "removed_docs": stats["input_count"] - stats["output_count"],
+            "dedup_rate": (stats["input_count"] - stats["output_count"]) / stats["input_count"] if stats["input_count"] > 0 else 0.0,
+        })
+        
+        return stats
 
 
 def main():

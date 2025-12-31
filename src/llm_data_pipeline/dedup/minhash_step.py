@@ -42,27 +42,13 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--input", default=None, help="Input directory")
 
 
-def run_minhash(config: PipelineConfig, **kwargs) -> dict:
-    """Computes MinHash signatures for dedup."""
+def _process_minhash(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
+    """Core MinHash processing function"""
     logger = PipelineLogger.get()
-
-    # Resolve paths
-    input_path, output_dir = resolve_io_paths(config, "minhash", "clean")
-
-    # Validate input path
-    validate_input_path(input_path, "minhash")
-
-    # Log input path and document count
-    logger.info(f"Reading MinHash input from: {input_path}")
-    ds = rd.read_parquet(str(input_path.absolute()))
-    logger.info(f"Found {ds.count()} docs in input path before applying limit")
-
-    limit = config.limit
-    if limit > 0:
-        logger.info(f"Applying limit of {limit} docs to MinHash input")
-        ds = ds.limit(limit)
-        logger.info(f"Input docs after limit: {ds.count()}")
-
+    
+    # Log document count before limit
+    logger.info(f"Found {ds.count()} docs in input before applying limit")
+    
     # Determine concurrency
     # We respect config.concurrency if set, else auto.
     concurrency = config.concurrency
@@ -79,14 +65,28 @@ def run_minhash(config: PipelineConfig, **kwargs) -> dict:
         batch_size=batch_size,
         compute=ActorPoolStrategy(size=concurrency),
     )
+    
+    return ds_sig
 
-    out_path = output_dir / "minhash_parquet"
-    write_parquet(ds_sig, out_path, logger)
 
-    count = ds_sig.count()
-    logger.info(f"Computed minhash for {count} docs.")
-
-    return {"docs_processed": count, "output_path": str(out_path)}
+def run_minhash(config: PipelineConfig, **kwargs) -> dict:
+    """Computes MinHash signatures for dedup."""
+    from llm_data_pipeline.core import step_wrapper
+    
+    stats = step_wrapper(
+        step_name="minhash",
+        process_func=_process_minhash,
+        config=config,
+        input_step_name="clean",
+        **kwargs
+    )
+    
+    # Add minhash-specific stats
+    stats.update({
+        "docs_processed": stats["output_count"]
+    })
+    
+    return stats
 
 
 def main():

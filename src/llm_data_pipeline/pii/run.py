@@ -5,8 +5,17 @@ from dataclasses import dataclass
 
 import pyarrow as pa
 import pyarrow.compute as pc
-import ray
+import ray.data as rd
 from ray.data import ActorPoolStrategy
+
+from llm_data_pipeline.core import (
+    PipelineConfig,
+    PipelineLogger,
+    resolve_io_paths,
+    run_step_entrypoint,
+    validate_input_path,
+    write_parquet,
+)
 
 # -------------------------
 # RE2-compatible regexes (PyArrow uses RE2)
@@ -168,13 +177,14 @@ class PresidioPersonNER:
         self.cfg = cfg
 
         try:
+            import spacy
             from presidio_analyzer import AnalyzerEngine
             from presidio_analyzer.nlp_engine import NlpEngineProvider
             from presidio_anonymizer import AnonymizerEngine
             from presidio_anonymizer.entities import OperatorConfig
         except Exception as e:
             raise RuntimeError(
-                "Presidio not installed. Install:\n"
+                "Presidio or spacy not installed. Install:\n"
                 "  pip install presidio-analyzer presidio-anonymizer spacy\n"
                 "and download spaCy models you use (e.g. en_core_web_sm, zh_core_web_sm).\n"
             ) from e
@@ -187,28 +197,53 @@ class PresidioPersonNER:
                 "zh": "zh_core_web_sm",
             }
 
+        # Check if spaCy models exist before initialization
+        missing_models = []
+        for lang, model_name in self.cfg.spacy_models.items():
+            if lang in self.cfg.supported_langs:
+                try:
+                    spacy.load(model_name)
+                except OSError:
+                    missing_models.append(model_name)
+
+        if missing_models:
+            raise RuntimeError(
+                f"Missing spaCy models: {', '.join(missing_models)}. Download them with:\n"
+                f"  python -m spacy download {' '.join(missing_models)}\n"
+                "Or disable NER processing with --disable-ner flag.\n"
+            )
+
         # Build NLP engine with multi-language spaCy models
-        nlp_configuration = {
-            "nlp_engine_name": "spacy",
-            "models": [
-                {"lang_code": lang, "model_name": self.cfg.spacy_models[lang]}
-                for lang in self.cfg.supported_langs
-                if lang in self.cfg.spacy_models
-            ],
-        }
-        provider = NlpEngineProvider(nlp_configuration)  # type: ignore
-        nlp_engine = provider.create_engine()
+        try:
+            nlp_configuration = {
+                "nlp_engine_name": "spacy",
+                "models": [
+                    {"lang_code": lang, "model_name": self.cfg.spacy_models[lang]}
+                    for lang in self.cfg.supported_langs
+                    if lang in self.cfg.spacy_models
+                ],
+            }
+            provider = NlpEngineProvider(nlp_configuration=nlp_configuration)  # type: ignore
+            nlp_engine = provider.create_engine()
 
-        self.analyzer = AnalyzerEngine(
-            nlp_engine=nlp_engine,
-            supported_languages=self.cfg.supported_langs,
-        )
-        self.anonymizer = AnonymizerEngine()
+            self.analyzer = AnalyzerEngine(
+                nlp_engine=nlp_engine,
+                supported_languages=self.cfg.supported_langs,
+            )
+            self.anonymizer = AnonymizerEngine()
 
-        self.operators = {
-            "PERSON": OperatorConfig("replace", {"new_value": "<NAME>"}),
-        }
-        self.entities = ["PERSON"]
+            self.operators = {
+                "PERSON": OperatorConfig("replace", {"new_value": "<NAME>"}),
+            }
+            self.entities = ["PERSON"]
+        except Exception as e:
+            raise RuntimeError(
+                f"Failed to initialize Presidio: {e}.\n"
+                "Possible solutions:\n"
+                "1. Ensure spaCy models are downloaded\n"
+                "2. Check if Presidio version is compatible with your Python version\n"
+                "3. Disable NER processing with --disable-ner flag\n"
+            ) from e
 
     def __call__(self, batch: pa.Table) -> pa.Table:
         col = self.cfg.text_col
@@ -270,7 +305,7 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--batch-size-structured", type=int, default=4096, help="Rows per batch for structured redaction")
     p.add_argument("--batch-size-ner", type=int, default=256, help="Rows per batch for NER stage (smaller is safer)")
-    p.add_argument("--actors-ner", type=int, default=32, help="Actor pool size for Presidio NER stage")
+    p.add_argument("--actors-ner", type=int, default=8, help="Actor pool size for Presidio NER stage")
     p.add_argument("--disable-ner", action="store_true", help="Disable PERSON NER stage entirely")
     p.add_argument("--keep-stats", action="store_true", help="Keep pii_has_* columns in output")
     p.add_argument("--supported-langs", default="en,zh", help="NER supported langs, comma-separated (default: en,zh)")
@@ -283,62 +318,126 @@ def parse_args() -> argparse.Namespace:
     return p.parse_args()
 
 
-def main():
-    args = parse_args()
+def add_args(p: argparse.ArgumentParser) -> None:
+    """添加 PII 特有参数"""
+    p.add_argument("--text-col", default="text", help="Text column name (default: text)")
+    p.add_argument(
+        "--lang-col", default="", help="Optional language column (e.g. lang). If missing/empty, heuristic en/zh."
+    )
+    p.add_argument("--disable-ner", action="store_true", help="Disable PERSON NER stage entirely")
+    p.add_argument("--keep-stats", action="store_true", help="Keep pii_has_* columns in output")
+    p.add_argument("--supported-langs", default="en,zh", help="NER supported langs, comma-separated (default: en,zh)")
+    p.add_argument("--spacy-en", default="en_core_web_sm", help="spaCy model for English")
+    p.add_argument("--spacy-zh", default="zh_core_web_sm", help="spaCy model for Chinese")
+    p.add_argument(
+        "--ner-score-threshold", type=float, default=0.0, help="Presidio analyze score threshold (lower => more recall)"
+    )
+    p.add_argument("--batch-size-structured", type=int, default=4096, help="Rows per batch for structured redaction")
+    p.add_argument("--batch-size-ner", type=int, default=256, help="Rows per batch for NER stage (smaller is safer)")
+    p.add_argument("--actors-ner", type=int, default=8, help="Actor pool size for Presidio NER stage")
 
-    ray.init(address=args.ray_address)
 
+def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
+    """Core PII redaction processing function"""
+    logger = PipelineLogger.get()
+    
+    # Build PII Config
+    logger.info("PII: Building PII config")
+    text_col = kwargs.get("text_col", "text")
+    lang_col = kwargs.get("lang_col", "").strip() or None
+    disable_ner = kwargs.get("disable_ner", False)
+    keep_stats = kwargs.get("keep_stats", False)
+    supported_langs = [x.strip() for x in kwargs.get("supported_langs", "en,zh").split(",") if x.strip()]
+    spacy_models = {
+        "en": kwargs.get("spacy_en", "en_core_web_sm"),
+        "zh": kwargs.get("spacy_zh", "zh_core_web_sm"),
+    }
+    ner_score_threshold = kwargs.get("ner_score_threshold", 0.0)
+    batch_size_structured = kwargs.get("batch_size_structured", 4096)
+    batch_size_ner = kwargs.get("batch_size_ner", 256)
+    actors_ner = kwargs.get("actors_ner", 4)  # Reduced default from 16 to 4 for faster initialization
+    
     cfg = Config(
-        text_col=args.text_col,
-        lang_col=(args.lang_col.strip() or None),
-        keep_stats=args.keep_stats,
-        enable_person_ner=(not args.disable_ner),
-        supported_langs=[x.strip() for x in args.supported_langs.split(",") if x.strip()],
-        spacy_models={
-            "en": args.spacy_en,
-            "zh": args.spacy_zh,
-        },
-        ner_score_threshold=args.ner_score_threshold,
+        text_col=text_col,
+        lang_col=lang_col,
+        keep_stats=keep_stats,
+        enable_person_ner=(not disable_ner),
+        supported_langs=supported_langs,
+        spacy_models=spacy_models,
+        ner_score_threshold=ner_score_threshold,
     )
 
-    ds = ray.data.read_parquet(args.input)
-
-    if args.num_blocks and args.num_blocks > 0:
-        ds = ds.repartition(args.num_blocks)
-
     # 1) Fast structured PII redaction + gating + ner_lang
+    logger.info("PII: Starting structured PII redaction")
     ds = ds.map_batches(
         StructuredPIIRedactor,
         fn_constructor_kwargs={"cfg": cfg},
         batch_format="pyarrow",
-        batch_size=args.batch_size_structured,
-        compute="tasks",  # type: ignore
+        batch_size=batch_size_structured,
+        compute=ActorPoolStrategy(size=1),  # Use small actor pool for faster initialization
         zero_copy_batch=True,
     )
 
     if cfg.enable_person_ner:
         # 2) Split dataset: run NER only where need_ner==True AND lang supported
+        logger.info("PII: Splitting dataset for NER processing")
         supported = set(cfg.supported_langs or [])
+
+        # Get total count first to avoid redundant counting
+        total_count = ds.count()
+        logger.info(f"PII: Total records: {total_count}")
 
         ds_ner = ds.filter(lambda r: bool(r["need_ner"]) and (r.get("ner_lang") in supported))
         ds_no = ds.filter(lambda r: (not bool(r["need_ner"])) or (r.get("ner_lang") not in supported))
 
-        # 3) Presidio PERSON NER stage (actor pool to reuse models)
-        ds_ner = ds_ner.map_batches(
-            PresidioPersonNER,
-            fn_constructor_kwargs={"cfg": cfg},
-            batch_format="pyarrow",
-            batch_size=args.batch_size_ner,
-            compute=ActorPoolStrategy(size=args.actors_ner),
-            zero_copy_batch=False,  # NER stage touches Python objects anyway
-        )
+        # Get actual count of NER-required data
+        logger.info("PII: Counting NER-required records")
+        ner_count = ds_ner.count()
+        logger.info(f"PII: Processing {ner_count} records through NER stage (out of {total_count} total)")
+
+        # 3) Presidio PERSON NER stage - dynamic actor adjustment
+        if ner_count > 0:
+            # Calculate optimal actors: at least 1, at most actors_ner, and not more than needed for batches
+            optimal_actors = max(1, min(actors_ner, (ner_count + batch_size_ner - 1) // batch_size_ner))
+            logger.info(f"PII: Using {optimal_actors} actors for NER processing (configured: {actors_ner})")
+
+            try:
+                # For small datasets, use a single actor to avoid overhead
+                if ner_count < 1000:
+                    logger.info("PII: Small dataset detected, using single actor for NER")
+                    ds_ner = ds_ner.map_batches(
+                        PresidioPersonNER,
+                        fn_constructor_kwargs={"cfg": cfg},
+                        batch_format="pyarrow",
+                        batch_size=batch_size_ner,
+                        compute=ActorPoolStrategy(size=1),  # Use single actor for small data
+                        zero_copy_batch=False,
+                    )
+                else:
+                    # For larger datasets, use actor pool with optimal size
+                    ds_ner = ds_ner.map_batches(
+                        PresidioPersonNER,
+                        fn_constructor_kwargs={"cfg": cfg},
+                        batch_format="pyarrow",
+                        batch_size=batch_size_ner,
+                        compute=ActorPoolStrategy(size=optimal_actors),
+                        zero_copy_batch=False,
+                    )
+            except Exception as e:
+                logger.warning(f"PII: NER processing failed, skipping PERSON redaction: {e}")
+                logger.warning("PII: To disable NER processing, use the --disable-ner flag")
+                # Skip NER processing, use original data
+                pass
 
         # 4) Merge back
-        ds_out = ds_no.union([ds_ner])
+        logger.info("PII: Merging datasets")
+        ds_out = ds_no.union(ds_ner)
     else:
+        logger.info("PII: NER disabled, skipping NER processing")
         ds_out = ds
 
     # 5) Drop internal columns unless asked to keep
+    logger.info("PII: Dropping internal columns")
     drop_cols = ["need_ner", "ner_lang"]
     if not cfg.keep_stats:
         drop_cols += ["pii_has_email", "pii_has_ip4", "pii_has_ip6", "pii_has_phone", "pii_has_ssn"]
@@ -348,9 +447,32 @@ def main():
     existing = [c for c in drop_cols if schema and hasattr(schema, "names") and c in schema.names]
     if existing:
         ds_out = ds_out.drop_columns(existing)
+    
+    return ds_out
 
-    # 6) Write parquet
-    ds_out.write_parquet(args.output)
+
+def run_pii(config: PipelineConfig, **kwargs) -> dict:
+    """Pipeline entry point for PII redaction"""
+    from llm_data_pipeline.core import step_wrapper
+    
+    stats = step_wrapper(
+        step_name="pii",
+        process_func=_process_pii,
+        config=config,
+        input_step_name="quality",
+        **kwargs
+    )
+    
+    return stats
+
+
+def main() -> None:
+    run_step_entrypoint(
+        description="llm_data_pipeline.pii.run",
+        run_func=run_pii,
+        add_args_func=add_args,
+        step_name="PII",
+    )
 
 
 if __name__ == "__main__":

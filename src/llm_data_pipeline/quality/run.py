@@ -22,16 +22,10 @@ def add_args(p: argparse.ArgumentParser):
     p.add_argument("--threshold", type=float, default=0.4, help="LID confidence threshold")
 
 
-def run_quality(config: PipelineConfig, **kwargs) -> dict:
-    """Quality filtering step"""
+def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
+    """Core quality filtering processing function"""
     logger = PipelineLogger.get()
-
-    # Resolve paths
-    input_path, output_dir = resolve_io_paths(config, "quality", "deduped")
-
-    # Validate input path
-    validate_input_path(input_path, "quality")
-
+    
     # Model path - fix: check if config.model_path is None before using it
     config_model_path = getattr(config, "model_path", None)
     model_path = (
@@ -41,23 +35,13 @@ def run_quality(config: PipelineConfig, **kwargs) -> dict:
     model_path = validate_model_path(model_path, "quality")
     logger.info(f"Using model path: {model_path}")
 
-    ds = rd.read_parquet(str(input_path.absolute()))
-
-    limit = config.limit
-    if limit > 0:
-        logger.info(f"DEBUG: Limiting quality input to {limit} records.")
-        ds = ds.limit(limit)
-
     orig_count = ds.count()
-    logger.info(f"Reading {orig_count} docs from {input_path}")
+    logger.info(f"Processing {orig_count} docs")
 
     # Handle empty dataset
     if orig_count == 0:
         logger.warning("Input dataset is empty. Skipping quality filtering.")
-        out_dir = output_dir / "quality_parquet"
-        # Create empty output directory
-        out_dir.mkdir(parents=True, exist_ok=True)
-        return {"input_docs": 0, "kept_docs": 0, "output_path": str(out_dir)}
+        return ds
 
     langs_str = kwargs.get("langs", "zh,en")
     langs = [lang.strip() for lang in langs_str.split(",") if lang.strip()]
@@ -103,10 +87,6 @@ def run_quality(config: PipelineConfig, **kwargs) -> dict:
     # Filter
     ds_kept = ds_scored.filter(lambda r: r["quality_keep"])
 
-    out_dir = output_dir / "quality_parquet"
-    logger.info(f"Writing results to {out_dir}...")
-    write_parquet(ds_kept, out_dir, logger)
-
     kept_count = ds_kept.count()
     orig_count = ds.count()
 
@@ -131,13 +111,34 @@ def run_quality(config: PipelineConfig, **kwargs) -> dict:
                 f"  Rejected {i + 1}: lang={doc['lang']}, score={doc['lang_score']:.4f}, text_start={doc['text'][:50]}..."
             )
 
-    return {
-        "input_docs": orig_count,
+    return ds_kept
+
+
+def run_quality(config: PipelineConfig, **kwargs) -> dict:
+    """Quality filtering step"""
+    from llm_data_pipeline.core import step_wrapper
+    
+    stats = step_wrapper(
+        step_name="quality",
+        process_func=_process_quality,
+        config=config,
+        input_step_name="clean",
+        **kwargs
+    )
+    
+    # Add quality-specific stats
+    orig_count = stats["input_count"]
+    kept_count = stats["output_count"]
+    filtered_count = orig_count - kept_count
+    keep_rate = kept_count / orig_count if orig_count > 0 else 0.0
+    
+    stats.update({
         "kept_docs": kept_count,
         "filtered_docs": filtered_count,
-        "keep_rate": keep_rate,
-        "output_path": str(out_dir),
-    }
+        "keep_rate": keep_rate
+    })
+    
+    return stats
 
 
 def main():

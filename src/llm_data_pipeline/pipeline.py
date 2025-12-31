@@ -15,6 +15,7 @@ from llm_data_pipeline.export.run import run_export
 
 # Import steps (will refactor these modules next)
 from llm_data_pipeline.ingest.run import run_ingest
+from llm_data_pipeline.pii.run import run_pii
 from llm_data_pipeline.quality.run import run_quality
 from llm_data_pipeline.tokenizer.run import run_tokenize
 from llm_data_pipeline.tokenizer.train import run_train_tokenizer
@@ -29,8 +30,8 @@ def main():
         "--steps",
         default="all",
         help=(
-            "Comma separated steps or 'all'. Available: ingest, clean, minhash, clustering, "
-            "quality, train_tokenizer, tokenize, export"
+            "Comma separated steps or 'all'. Available: ingest, clean, quality, pii, minhash, clustering, "
+            "train_tokenizer, tokenize, export"
         ),
     )
     p.add_argument("--resume-from", default=None, help="Resume from this step (inclusive)")
@@ -43,6 +44,12 @@ def main():
 
     # Step specific consolidated args (can be expanded)
     p.add_argument("--langs", default="zh,en", help="Languages for quality filter")
+    
+    # PII specific args
+    p.add_argument("--disable-ner", action="store_true", help="Disable PERSON NER stage entirely")
+    p.add_argument("--text-col", default="text", help="Text column name (default: text)")
+    p.add_argument("--lang-col", default="", help="Optional language column for PII")
+    p.add_argument("--keep-stats", action="store_true", help="Keep pii_has_* columns in output")
 
     args = p.parse_args()
 
@@ -66,9 +73,10 @@ def main():
     all_steps = [
         ("ingest", run_ingest),
         ("clean", run_clean),
+        ("quality", run_quality),
+        ("pii", run_pii),
         ("minhash", run_minhash),
         ("clustering", run_clustering),
-        ("quality", run_quality),
         ("train_tokenizer", run_train_tokenizer),
         ("tokenize", run_tokenize),
         ("export", run_export),
@@ -135,6 +143,12 @@ def main():
         extra = {}
         if name == "quality":
             extra["langs"] = args.langs
+        elif name == "pii":
+            # PII specific args
+            extra["disable_ner"] = args.disable_ner
+            extra["text_col"] = args.text_col
+            extra["lang_col"] = args.lang_col
+            extra["keep_stats"] = args.keep_stats
 
         # Ensure we silence Ray again before each step
         silence_ray_loggers(logger)
@@ -148,13 +162,24 @@ def main():
         # Save stats after each step
         try:
             with open(stats_file, "w") as f:
-                json.dump(pipeline_stats, f, indent=2, default=str)
+                # Sort the stats by the order in all_steps to ensure consistent JSON order
+                sorted_stats = {}
+                for step_name, _ in all_steps:
+                    if step_name in pipeline_stats:
+                        sorted_stats[step_name] = pipeline_stats[step_name]
+                json.dump(sorted_stats, f, indent=2, default=str)
             logger.info(f"Saved pipeline stats to {stats_file}")
         except Exception as e:
             logger.warning(f"Failed to save pipeline stats: {e}")
 
+    # Sort the final stats by the order in all_steps to ensure consistent JSON order
+    sorted_pipeline_stats = {}
+    for step_name, _ in all_steps:
+        if step_name in pipeline_stats:
+            sorted_pipeline_stats[step_name] = pipeline_stats[step_name]
+
     logger.info("Pipeline finished successfully.")
-    logger.info(f"Final pipeline stats: {json.dumps(pipeline_stats, indent=2, default=str)}")
+    logger.info(f"Final pipeline stats: {json.dumps(sorted_pipeline_stats, indent=2, default=str)}")
 
 
 if __name__ == "__main__":

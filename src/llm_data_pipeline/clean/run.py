@@ -29,23 +29,10 @@ def add_args(p: argparse.ArgumentParser) -> None:
     p.add_argument("--max-dup-line-ratio", type=float, default=0.35)
 
 
-def run_clean(config: PipelineConfig, **kwargs) -> dict:
-    """Pipeline entry point for cleaning"""
+def _process_clean(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> tuple[rd.Dataset, rd.Dataset]:
+    """Core cleaning processing function"""
     logger = PipelineLogger.get()
-
-    # Resolve paths
-    input_path, output_dir = resolve_io_paths(config, "clean", "ingest")
-
-    # Validate input path
-    validate_input_path(input_path, "clean")
-
-    ds = rd.read_parquet(str(input_path.absolute()))
-
-    limit = config.limit
-    if limit > 0:
-        logger.info(f"DEBUG: Limiting clean input to {limit} records.")
-        ds = ds.limit(limit)
-
+    
     rules = CleanRules(
         min_chars=kwargs.get("min_chars", 200),
         max_chars=kwargs.get("max_chars", 200_000),
@@ -65,20 +52,70 @@ def run_clean(config: PipelineConfig, **kwargs) -> dict:
         taskpool_size=taskpool_size,
         num_cpus=num_cpus,
     )
+    
+    return kept_ds, drop_ds
 
+
+def run_clean(config: PipelineConfig, **kwargs) -> dict:
+    """Pipeline entry point for cleaning"""
+    from llm_data_pipeline.core import step_wrapper, read_parquet, resolve_io_paths, validate_input_path, write_parquet
+    logger = PipelineLogger.get()
+    import time
+    
+    total_start = time.time()
+    
+    # Clean step is special because it produces two outputs: kept and dropped
+    # We'll use a custom approach that leverages the step_wrapper pattern but handles both outputs
+    
+    # Resolve paths
+    input_path, output_dir = resolve_io_paths(config, "clean", "ingest")
+    
+    # Validate input path
+    validate_input_path(input_path, "clean")
+    
+    # Read data with stats
+    ds, (input_file_count, input_total_size) = read_parquet(input_path, config)
+    input_count = ds.count()
+    
+    # Core processing
+    kept_ds, drop_ds = _process_clean(ds, config, **kwargs)
+    
+    # Write kept and dropped datasets
     kept_dir = output_dir / "cleaned_parquet"
     drop_dir = output_dir / "dropped_parquet"
-    kept_dir.mkdir(parents=True, exist_ok=True)
-    drop_dir.mkdir(parents=True, exist_ok=True)
-
-    write_parquet(kept_ds, kept_dir, logger)
-
+    
+    # Write kept dataset
+    kept_file_count, kept_total_size = write_parquet(kept_ds, kept_dir, logger)
     kept_count = kept_ds.count()
+    
+    # Write dropped dataset
+    write_parquet(drop_ds, drop_dir, logger)
     drop_count = drop_ds.count()
+    
+    # Calculate total duration
+    total_duration = time.time() - total_start
+    
+    stats = {
+        "step_name": "clean",
+        "input_path": str(input_path),
+        "input_file_count": input_file_count,
+        "input_total_size": input_total_size,
+        "input_count": input_count,
+        "output_path": str(kept_dir),
+        "output_file_count": kept_file_count,
+        "output_total_size": kept_total_size,
+        "output_count": kept_count,
+        "kept_count": kept_count,
+        "drop_count": drop_count,
+        "duration_seconds": total_duration,
+        "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+    }
+    
+    logger.info(f"Clean step completed with stats: {stats}")
     logger.info(f"kept_count = {kept_count}")
     logger.info(f"drop_count = {drop_count}")
-
-    return {"input_count": ds.count(), "kept_count": kept_count, "drop_count": drop_count, "output_path": str(kept_dir)}
+    
+    return stats
 
 
 def main() -> None:

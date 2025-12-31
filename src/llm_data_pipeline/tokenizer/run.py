@@ -2,6 +2,7 @@ import argparse
 import glob
 import json
 import os
+from pathlib import Path
 from collections.abc import Iterable, Iterator
 from typing import Any
 
@@ -245,34 +246,19 @@ def write_parquet_shard(
 # -----------------------------
 # Pipeline
 # -----------------------------
-def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
-    """Tokenize and pack step"""
+def _process_tokenize(input_path: str, output_path: str, config: PipelineConfig, **kwargs) -> tuple[dict, int, int]:
+    """Core tokenization and packing processing function"""
     logger = PipelineLogger.get()
 
     # Helper to resolve generic args
     def get_arg(name, default=None):
         return kwargs.get(name, default)
 
-    # Path resolution
-    manual_input = get_arg("input_dir")
-    if manual_input:
-        in_path = str(manual_input)
-    else:
-        # We rely on resolve logic + standard naming
-        input_path, _ = resolve_io_paths(config, "tokenize", "quality")
-        in_path = str(input_path)
-
     output_dir_base = config.output_base
-    manual_output = get_arg("output_dir")
-    if manual_output:
-        out_path = str(manual_output)
-    else:
-        # Default
-        out_path = str(output_dir_base / "token_packing_parquet")
+    # Default SPM model path from train_tokenizer step
+    spm_model_path = str(get_arg("spm_model", output_dir_base / "tokenizers/my_spm.model"))
 
-    spm_model_path = str(get_arg("spm_model", output_dir_base / "tokenizers/spm32k/spm_32k.model"))
-
-    os.makedirs(out_path, exist_ok=True)
+    os.makedirs(output_path, exist_ok=True)
 
     # args mapping
     text_col = get_arg("text_col", "text")
@@ -289,10 +275,10 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     emit_seq_id = bool(get_arg("emit_seq_id", False))
     emit_seq_lens_offsets = bool(get_arg("emit_seq_lens_offsets", False))
 
-    parquet_files = sorted(glob.glob(os.path.join(in_path, "*.parquet")))
+    parquet_files = sorted(glob.glob(os.path.join(input_path, "*.parquet")))
     if not parquet_files:
-        logger.warning(f"No parquet files found under: {in_path}")
-        return {"status": "skipped", "reason": "no_input_files"}
+        logger.warning(f"No parquet files found under: {input_path}")
+        return {"status": "skipped", "reason": "no_input_files"}, 0, 0
 
     # 1) Load parquet dataset (HF datasets)
     ds = load_dataset(
@@ -373,14 +359,14 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     for item in packer:
         rows_buf.append(item)
         if len(rows_buf) >= shard_chunks:
-            out_file = os.path.join(out_path, f"packed_{shard_idx:05d}.parquet")
+            out_file = os.path.join(output_path, f"packed_{shard_idx:05d}.parquet")
             write_parquet_shard(out_file, rows_buf, seq_len=seq_len, compression=(comp_arg or "none"))
             total_chunks += len(rows_buf)
             rows_buf.clear()
             shard_idx += 1
 
     if rows_buf:
-        out_file = os.path.join(out_path, f"packed_{shard_idx:05d}.parquet")
+        out_file = os.path.join(output_path, f"packed_{shard_idx:05d}.parquet")
         write_parquet_shard(out_file, rows_buf, seq_len=seq_len, compression=(comp_arg or "none"))
         total_chunks += len(rows_buf)
         rows_buf.clear()
@@ -388,9 +374,9 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     meta = {
         "seq_len": seq_len,
         "eos_id": eos_id,
-        "spm_model": os.path.abspath(spm_model_path),
-        "input_dir": os.path.abspath(in_path),
-        "output_dir": os.path.abspath(out_path),
+        "spm_model": spm_model_path,
+        "input_dir": input_path,
+        "output_dir": output_path,
         "num_proc": num_proc,
         "drop_remainder": drop_remainder,
         "add_eos": add_eos,
@@ -400,13 +386,90 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
         "total_chunks": total_chunks,
         "total_tokens_out": int(total_chunks) * int(seq_len),
     }
-    with open(os.path.join(out_path, "packing_meta.json"), "w", encoding="utf-8") as f:
+    with open(os.path.join(output_path, "packing_meta.json"), "w", encoding="utf-8") as f:
         json.dump(meta, f, ensure_ascii=False, indent=2)
 
-    logger.info(f"[OK] Wrote {total_chunks} packed chunks to: {out_path}")
-    logger.info(f"[Meta] {os.path.join(out_path, 'packing_meta.json')}")
+    logger.info(f"[OK] Wrote {total_chunks} packed chunks to: {output_path}")
+    logger.info(f"[Meta] {os.path.join(output_path, 'packing_meta.json')}")
 
-    return meta
+    return meta, len(ds), total_chunks
+
+
+def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
+    """Tokenize and pack step"""
+    from llm_data_pipeline.core import resolve_io_paths, validate_input_path, get_directory_stats
+    logger = PipelineLogger.get()
+    import time
+    
+    total_start = time.time()
+    
+    # Helper to resolve generic args
+    def get_arg(name, default=None):
+        return kwargs.get(name, default)
+
+    # Path resolution
+    manual_input = get_arg("input_dir")
+    if manual_input:
+        input_path = str(manual_input)
+    else:
+        # We rely on resolve logic + standard naming
+        resolved_input_path, _ = resolve_io_paths(config, "tokenize", "quality")
+        input_path = str(resolved_input_path)
+
+    output_dir_base = config.output_base
+    manual_output = get_arg("output_dir")
+    if manual_output:
+        output_path = str(manual_output)
+    else:
+        # Default
+        output_path = str(output_dir_base / "token_packing_parquet")
+    
+    # Validate input path
+    validate_input_path(input_path, "tokenize")
+    
+    # Get input stats
+    input_file_count, input_total_size = get_directory_stats(Path(input_path))
+    
+    # Core processing
+    meta, input_count, output_count = _process_tokenize(input_path, output_path, config, **kwargs)
+    
+    # Get output stats
+    output_file_count, output_total_size = get_directory_stats(Path(output_path))
+    
+    # Calculate total duration
+    total_duration = time.time() - total_start
+    
+    # Prepare comprehensive stats in actual execution order
+    stats = {
+        "step_name": "tokenize",
+        "input_path": input_path,
+        "input_file_count": input_file_count,
+        "input_total_size": input_total_size,
+        "input_count": input_count,
+        "output_path": output_path,
+        "seq_len": meta["seq_len"],
+        "eos_id": meta["eos_id"],
+        "spm_model": meta["spm_model"],
+        "input_dir": meta["input_dir"],
+        "output_dir": meta["output_dir"],
+        "num_proc": meta["num_proc"],
+        "drop_remainder": meta["drop_remainder"],
+        "add_eos": meta["add_eos"],
+        "ensure_eos": meta["ensure_eos"],
+        "emit_seq_id": meta["emit_seq_id"],
+        "emit_seq_lens_offsets": meta["emit_seq_lens_offsets"],
+        "output_count": output_count,
+        "total_chunks": meta["total_chunks"],
+        "total_tokens_out": meta["total_tokens_out"],
+        "output_file_count": output_file_count,
+        "output_total_size": output_total_size,
+        "duration_seconds": total_duration,
+        "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+    }
+    
+    logger.info(f"Tokenize step completed with stats: {stats}")
+    
+    return stats
 
 
 def add_args(ap: argparse.ArgumentParser):
