@@ -43,10 +43,10 @@ def add_args(p: argparse.ArgumentParser) -> None:
 def _process_minhash(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
     """Core MinHash processing function"""
     logger = PipelineLogger.get()
-    
+
     # Log document count before limit
     logger.info(f"Found {ds.count()} docs in input before applying limit")
-    
+
     # Determine concurrency
     # We respect config.concurrency if set, else auto.
     concurrency = config.concurrency
@@ -59,29 +59,23 @@ def _process_minhash(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
     batch_size = config.batch_size
 
     ds_sig = ds.map_batches(
-        MinHashCompute(),
+        MinHashCompute,
         batch_size=batch_size,
         compute=ActorPoolStrategy(size=concurrency),
     )
-    
+
     return ds_sig
 
 
 def run_minhash(config: PipelineConfig, **kwargs) -> dict:
     """Computes MinHash signatures for dedup."""
     stats = step_wrapper(
-        step_name="minhash",
-        process_func=_process_minhash,
-        config=config,
-        input_step_name="pii",
-        **kwargs
+        step_name="minhash", process_func=_process_minhash, config=config, input_step_name="pii", **kwargs
     )
-    
+
     # Add minhash-specific stats
-    stats.update({
-        "docs_processed": stats["output_count"]
-    })
-    
+    stats.update({"docs_processed": stats["output_count"]})
+
     return stats
 
 

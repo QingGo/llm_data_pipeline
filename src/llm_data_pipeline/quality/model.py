@@ -11,24 +11,33 @@ from fasttext.FastText import _FastText
 from llm_data_pipeline.core import PipelineLogger
 
 # 保存原始的check函数
-original_check: callable[[str], str] = None  # type: ignore[assignment]
+# Try to get the original check function from FastText module
+original_check = None
 for item in dir(FastText_module):
     if item == "check":
         original_check = getattr(FastText_module, item)
         break
 
-# 如果没有找到原始check函数，定义一个简单的
+# If original_check is still None after the loop, use this fallback
+# We'll define a function and assign it directly to avoid redeclaration
 if original_check is None:
-
-    def original_check(entry: str) -> str:
+    # Define the fallback function
+    def _check_func(entry: str) -> str:
+        """Default check function if original is not found"""
         if entry.find("\n") != -1:
             raise ValueError("predict processes one line at a time (remove '\n')")
         return entry + "\n"
+
+    # Assign the function to original_check
+    original_check = _check_func
 
 
 # 重新实现FastText._FastText.predict方法
 def fixed_predict(self, text, k=1, threshold=0.0, on_unicode_error="strict"):
     """Fixed predict method that returns simple lists instead of numpy arrays"""
+    # Ensure original_check is a callable (should never be None due to our setup)
+    assert callable(original_check), "original_check must be a callable"
+
     if isinstance(text, list):
         # 批量处理 - 使用FastText的multilinePredict方法
         texts = [original_check(t) for t in text]

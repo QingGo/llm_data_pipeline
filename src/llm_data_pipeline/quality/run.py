@@ -14,6 +14,19 @@ from llm_data_pipeline.core import (
 from llm_data_pipeline.quality.model import LanguageFilter
 
 
+class QualityMapper:
+    def __init__(self, model_path, allowed_langs, threshold):
+        self.filter = LanguageFilter(model_path=model_path, allowed_langs=allowed_langs, threshold=threshold)
+
+    def __call__(self, row):
+        text = row.get("text", "")
+        keep, label, score = self.filter.keep(text)
+        row["quality_keep"] = keep
+        row["lang"] = label
+        row["lang_score"] = score
+        return row
+
+
 def add_args(p: argparse.ArgumentParser):
     p.add_argument("--model-path", default="./models/lid.176.bin", help="Path to fasttext LID model")
     p.add_argument("--langs", default="zh,en", help="Comma separated languages to keep")
@@ -23,7 +36,7 @@ def add_args(p: argparse.ArgumentParser):
 def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
     """Core quality filtering processing function"""
     logger = PipelineLogger.get()
-    
+
     # Model path - fix: check if config.model_path is None before using it
     config_model_path = getattr(config, "model_path", None)
     model_path = (
@@ -55,21 +68,12 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
     logger.info(f"Using language confidence threshold: {threshold}")
 
     logger.info("Initializing LanguageFilter with model...")
-
-    class QualityMapper:
-        def __init__(self):
-            self.filter = LanguageFilter(model_path=model_path, allowed_langs=langs, threshold=threshold)
-
-        def __call__(self, row):
-            text = row.get("text", "")
-            keep, label, score = self.filter.keep(text)
-            row["quality_keep"] = keep
-            row["lang"] = label
-            row["lang_score"] = score
-            return row
-
     logger.info("Starting language detection and scoring...")
-    ds_scored = ds.map(QualityMapper(), compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4))
+    ds_scored = ds.map(
+        QualityMapper,
+        fn_constructor_args=(model_path, langs, threshold),
+        compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4),
+    )
 
     # Log language detection statistics
     logger.info("Language detection completed. Calculating statistics...")
@@ -116,25 +120,17 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
 def run_quality(config: PipelineConfig, **kwargs) -> dict:
     """Quality filtering step"""
     stats = step_wrapper(
-        step_name="quality",
-        process_func=_process_quality,
-        config=config,
-        input_step_name="clean",
-        **kwargs
+        step_name="quality", process_func=_process_quality, config=config, input_step_name="clean", **kwargs
     )
-    
+
     # Add quality-specific stats
     orig_count = stats["input_count"]
     kept_count = stats["output_count"]
     filtered_count = orig_count - kept_count
     keep_rate = kept_count / orig_count if orig_count > 0 else 0.0
-    
-    stats.update({
-        "kept_docs": kept_count,
-        "filtered_docs": filtered_count,
-        "keep_rate": keep_rate
-    })
-    
+
+    stats.update({"kept_docs": kept_count, "filtered_docs": filtered_count, "keep_rate": keep_rate})
+
     return stats
 
 
