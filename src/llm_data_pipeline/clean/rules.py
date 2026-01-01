@@ -1,4 +1,10 @@
-"""清洗规则与度量：判定文本是否保留并给出原因与指标"""
+"""
+Cleaning Rules and Metrics.
+
+This module defines the heuristic rules and metrics used to judge the quality of text documents.
+It includes functions for basic normalization and scoring based on various ratios (whitespace,
+language signal, punctuation, etc.).
+"""
 
 import re
 from dataclasses import dataclass
@@ -11,7 +17,17 @@ _PUNCT_RE = re.compile(r"[^\w\s\u4e00-\u9fff]", re.UNICODE)
 
 @dataclass(frozen=True)
 class CleanRules:
-    """判定文本质量的阈值集合"""
+    """
+    Thresholds and parameters for determining text quality and retention.
+
+    Attributes:
+        min_chars: Minimum character count to retain a document.
+        max_chars: Maximum character count to retain a document.
+        min_non_ws_ratio: Minimum ratio of non-whitespace characters to total characters.
+        min_alpha_cjk_ratio: Minimum ratio of alphabetic or CJK characters to total characters (language signal).
+        max_punct_ratio: Maximum ratio of punctuation characters to total characters.
+        max_dup_line_ratio: Maximum allowed ratio of duplicate lines to unique lines (detects repeated content).
+    """
 
     min_chars: int = 200
     max_chars: int = 200_000
@@ -22,9 +38,21 @@ class CleanRules:
 
 
 def basic_clean(text: str) -> str:
-    """统一换行并压缩多余空行"""
+    """
+    Performs basic text normalization.
+
+    - Normalizes line endings to \n.
+    - Strips leading/trailing whitespace.
+    - Compresses 3 or more consecutive newlines into 2 (paragraph separation).
+
+    Args:
+        text: Input text.
+
+    Returns:
+        Normalized text.
+    """
     text = text.replace("\r\n", "\n").replace("\r", "\n").strip()
-    # 使用正则表达式替代while循环，一次性将3个及以上连续换行压缩为2个
+    # Replace 3+ newlines with 2 newlines (paragraph break)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text
 

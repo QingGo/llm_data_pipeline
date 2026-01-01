@@ -1,3 +1,10 @@
+"""
+Data Export Step.
+
+This module handles the export of tokenized data to binary formats (e.g., uint16/int32 binary files)
+suitable for training frameworks. It flattens the token lists and writes them to a single binary file.
+"""
+
 import argparse
 from pathlib import Path
 
@@ -15,6 +22,12 @@ from llm_data_pipeline.core import (
 
 
 def add_args(p: argparse.ArgumentParser):
+    """
+    Adds Export step specific arguments to the argument parser.
+
+    Args:
+        p: The ArgumentParser instance.
+    """
     p.add_argument("--input-dir", default=None, help="Packed parquet dir")
     p.add_argument("--output-file", default=None, help="Output binary file")
     p.add_argument("--dtype", default="uint16", choices=["uint16", "int32"])
@@ -25,6 +38,7 @@ def run_export(config: PipelineConfig, **kwargs) -> dict:
     logger = PipelineLogger.get()
     base_calc_out = config.output_base
     import time
+
     total_start = time.time()
 
     # Resolve input directory

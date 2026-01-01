@@ -1,3 +1,11 @@
+"""
+Tokenizer Training Step.
+
+This module handles the training of a SentencePiece tokenizer on the cleaned dataset.
+It selects a subset of data, writes it to sharded text files, and runs the SentencePiece trainer.
+It also includes utility functions to compare the trained tokenizer against reference models (e.g., Llama 3).
+"""
+
 import argparse
 from pathlib import Path
 
@@ -21,6 +29,9 @@ def write_shards_with_ray(
     max_chars: int,
     limit: int = 0,
 ) -> tuple[list[str], int]:
+    """
+    Reads Parquet data and writes it to sharded text files for SentencePiece training.
+    """
     logger = PipelineLogger.get()
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -84,6 +95,10 @@ def train_sentencepiece_py(
     model_type: str,
     character_coverage: float,
 ):
+    """
+    Trains a SentencePiece model using the generated text shards.
+    Redirects C++ output to Python logger.
+    """
     import os
     import tempfile
     from contextlib import contextmanager
@@ -250,6 +265,10 @@ def train_sentencepiece_py(
 
 
 def compare_token_lengths(spm_model_path: Path, text: str):
+    """
+    Compares the trained SentencePiece model against a reference tokenizer (Llama 3).
+    Calculates compression ratio and token savings on a sample text.
+    """
     sp = spm.SentencePieceProcessor()
     sp.Load(str(spm_model_path))
     ids_spm = sp.EncodeAsIds(text)
@@ -408,6 +427,9 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
 
 
 def add_args(ap: argparse.ArgumentParser):
+    """
+    Adds Tokenizer Training step specific arguments.
+    """
     ap.add_argument("--parquet_dir", type=str, default=None)
     ap.add_argument("--work_dir", type=str, default=None)
     ap.add_argument(

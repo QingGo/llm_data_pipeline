@@ -1,3 +1,11 @@
+"""
+Quality Filtering Step.
+
+This module implements a quality filtering step using a FastText-based Language Identification (LID) model.
+It scores documents based on their language and confidence, filtering out those that don't match the
+allowed languages or have low confidence.
+"""
+
 import argparse
 import os
 
@@ -15,10 +23,19 @@ from llm_data_pipeline.quality.model import LanguageFilter
 
 
 class QualityMapper:
+    """
+    Ray Data mapper class for language quality filtering.
+    Initializes the LanguageFilter model once per worker.
+    """
+
     def __init__(self, model_path, allowed_langs, threshold):
         self.filter = LanguageFilter(model_path=model_path, allowed_langs=allowed_langs, threshold=threshold)
 
     def __call__(self, row):
+        """
+        Applies language filtering to a single row.
+        Adds 'quality_keep', 'lang', and 'lang_score' columns.
+        """
         text = row.get("text", "")
         keep, label, score = self.filter.keep(text)
         row["quality_keep"] = keep
@@ -28,13 +45,23 @@ class QualityMapper:
 
 
 def add_args(p: argparse.ArgumentParser):
+    """
+    Adds Quality step specific arguments to the argument parser.
+
+    Args:
+        p: The ArgumentParser instance.
+    """
     p.add_argument("--model-path", default="./models/lid.176.bin", help="Path to fasttext LID model")
     p.add_argument("--langs", default="zh,en", help="Comma separated languages to keep")
     p.add_argument("--threshold", type=float, default=0.4, help="LID confidence threshold")
 
 
 def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
-    """Core quality filtering processing function"""
+    """
+    Core quality filtering processing function.
+
+    Configures the LanguageFilter and maps it over the dataset to score and filter documents.
+    """
     logger = PipelineLogger.get()
 
     # Model path - fix: check if config.model_path is None before using it

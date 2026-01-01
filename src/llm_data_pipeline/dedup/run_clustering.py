@@ -1,3 +1,10 @@
+"""
+Clustering and Deduplication Entry Point.
+
+This module invokes the global deduplication process (LSH + Connected Components).
+It takes MinHash signatures as input and outputs a filtered dataset containing only distinct documents.
+"""
+
 import argparse
 from pathlib import Path
 
@@ -17,7 +24,12 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 
 def _process_clustering(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
-    """Core clustering processing function"""
+    """
+    Core clustering logic.
+
+    Checks for required columns, runs global LSH deduplication,
+    and filters the dataset to keep only canonical documents.
+    """
     logger = PipelineLogger.get()
 
     rows_per_band = getattr(config, "rows_per_band", kwargs.get("rows_per_band", 4))
@@ -66,7 +78,11 @@ def _process_clustering(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.
 
 
 def run_clustering(config: PipelineConfig, **kwargs) -> dict:
-    """Clustering & Dedup Step"""
+    """
+    Pipeline entry point for Clustering & Deduplication.
+
+    Can be run as part of the pipeline or standalone with a manual input path.
+    """
     from llm_data_pipeline.core import step_wrapper
 
     logger = PipelineLogger.get()

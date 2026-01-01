@@ -17,8 +17,13 @@ from llm_data_pipeline.core import (
 
 
 def add_args(p: argparse.ArgumentParser) -> None:
-    """添加 Clean 特有参数"""
-    # rules
+    """
+    Adds Clean step specific arguments to the argument parser.
+
+    Args:
+        p: The ArgumentParser instance.
+    """
+    # rules arguments
     p.add_argument("--min-chars", type=int, default=200)
     p.add_argument("--max-chars", type=int, default=200_000)
     p.add_argument("--min-non-ws-ratio", type=float, default=0.7)
@@ -28,7 +33,19 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 
 def _process_clean(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> tuple[rd.Dataset, rd.Dataset]:
-    """Core cleaning processing function"""
+    """
+    Core cleaning processing function logic.
+
+    Configures the cleaning rules based on arguments and executes the Ray Data cleaning step.
+
+    Args:
+        ds: Input Ray Dataset.
+        config: Pipeline configuration.
+        **kwargs: specific arguments for cleaning rules (min_chars, max_chars, etc.).
+
+    Returns:
+        A tuple of (kept_dataset, dropped_dataset).
+    """
     rules = CleanRules(
         min_chars=kwargs.get("min_chars", 200),
         max_chars=kwargs.get("max_chars", 200_000),
@@ -53,7 +70,19 @@ def _process_clean(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> tuple[rd
 
 
 def run_clean(config: PipelineConfig, **kwargs) -> dict:
-    """Pipeline entry point for cleaning"""
+    """
+    Pipeline entry point for the Clean step.
+
+    Reads the input dataset (Parquet), cleans it using heuristic rules,
+    and saves both the retained ('kept') and rejected ('dropped') documents.
+
+    Args:
+        config: Pipeline configuration.
+        **kwargs: Additional arguments passed to the step.
+
+    Returns:
+        Execution stats including counts of kept and dropped documents.
+    """
 
     logger = PipelineLogger.get()
 

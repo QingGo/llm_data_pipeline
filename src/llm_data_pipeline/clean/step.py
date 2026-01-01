@@ -1,4 +1,10 @@
-"""清洗步骤：对抽取得到的文档文本进行规则化清洗与打分"""
+"""
+Cleaning Step Logic.
+
+This module implements the Ray Data specific logic for the cleaning step.
+It defines the `CleanConfig` and the `clean_dataset` transformation function that applies the
+cleaning rules in a distributed manner.
+"""
 
 from dataclasses import dataclass
 
@@ -9,7 +15,13 @@ from llm_data_pipeline.clean.rules import CleanRules, basic_clean, judge
 
 @dataclass(frozen=True)
 class CleanConfig:
-    """清洗过程的配置项"""
+    """
+    Configuration for the cleaning step.
+
+    Attributes:
+        batch_size: Batch size for Ray Data processing.
+        rules: Set of rules for judging text quality.
+    """
 
     batch_size: int = 256
     rules: CleanRules = CleanRules()
@@ -18,17 +30,34 @@ class CleanConfig:
 def clean_dataset(
     ds: rd.Dataset, cfg: CleanConfig, taskpool_size: int = 0, num_cpus: float = 1.0
 ) -> tuple[rd.Dataset, rd.Dataset]:
-    """对输入 Dataset 批处理清洗并返回保留与丢弃的两个子集
+    """
+    Cleans the input dataset based on the provided configuration rules.
 
-    输入：ingest 输出的 Dataset（含 doc_id/url/warc_date/source_path/text）
-    输出：`(kept_ds, dropped_ds)` 两个 Dataset
+    It separates the dataset into two: one with documents that passed the cleaning rules ('kept')
+    and one with documents that failed ('dropped'), including the reason for rejection.
+
+    Args:
+        ds: Input Ray Dataset containing raw documents.
+        cfg: Cleaning configuration.
+        taskpool_size: Size of the actor pool for parallel processing (0=auto).
+        num_cpus: Number of CPUs to allocate per task.
+
+    Returns:
+        A tuple (kept_ds, dropped_ds).
     """
     # map_batches default compute is "tasks"
     # we use concurrency to control parallelism if taskpool_size is set
     concurrency = taskpool_size if taskpool_size > 0 else None
 
     def clean_batch(df):
-        """单批次清洗逻辑，返回包含清洗结果与度量的 DataFrame"""
+        """
+        Processes a single batch of data.
+
+        - Normalizes text.
+        - Applies cleaning rules.
+        - Calculates quality metrics.
+        - Returns a DataFrame with added metadata columns (kept, drop_reason, metrics).
+        """
 
         texts = df["text"].astype(str).tolist()
         kept, reason = [], []

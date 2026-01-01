@@ -1,3 +1,15 @@
+"""
+Core Utilities and Shared Logic.
+
+This module provides the foundational components for the LLM data pipeline, including:
+- Pipeline configuration (`PipelineConfig`).
+- centralized logging setup (`PipelineLogger`).
+- Path and I/O resolution (`resolve_io_paths`).
+- Ray initialization and management (`init_ray`, `silence_ray_loggers`).
+- Standardized step wrapper (`step_wrapper`, `run_step_entrypoint`).
+- Common argument parsing (`get_arg_parser`).
+"""
+
 import argparse
 import logging
 import sys

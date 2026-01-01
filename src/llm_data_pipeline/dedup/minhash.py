@@ -1,3 +1,10 @@
+"""
+MinHash Implementation.
+
+This module provides an efficient, vectorized implementation of MinHash using NumPy and xxHash.
+It supports generating signatures for text documents to estimation Jaccard similarity.
+"""
+
 import re
 
 import numpy as np
@@ -7,7 +14,12 @@ import xxhash
 
 
 def normalize_text(text: str) -> str:
-    # 你可以按需求加更多规则：Unicode NFKC、去HTML等
+    """
+    Normalizes text for shingling.
+    - Lowercases the text.
+    - Replaces multiple whitespace characters with a single space.
+    - Strips leading/trailing whitespace.
+    """
     text = text.lower()
     text = re.sub(r"\s+", " ", text).strip()
     return text
@@ -15,8 +27,12 @@ def normalize_text(text: str) -> str:
 
 def char_ngrams(text: str, n: int = 5) -> set[bytes]:
     """
-    中文/混合文本常用 char n-gram。
-    返回 bytes，便于后续哈希与 datasketch.update 对齐。
+    Generates character n-grams from the text.
+    Returns a set of bytes to ensure consistency for hashing.
+
+    Args:
+        text: Input text.
+        n: N-gram size (default 5).
     """
     t = normalize_text(text)
     if len(t) < n:
@@ -28,6 +44,11 @@ def char_ngrams(text: str, n: int = 5) -> set[bytes]:
 
 
 class VectorizedMinHash:
+    """
+    Optimized MinHash implementation using NumPy for vectorized operations.
+    Uses 64-bit hashing (xxhash) and permutations.
+    """
+
     def __init__(self, k: int = 128, seed: int = 42, ngram_size: int = 5):
         self.k = k
         self.seed = seed
@@ -57,6 +78,8 @@ class VectorizedMinHash:
         # Generate b similarly
         b_high = rng.randint(0, 2**32, size=self.k, dtype=np.uint64)
         b_low = rng.randint(0, 2**32, size=self.k, dtype=np.uint64)
+        self.b = (b_high << 32) | b_low
+
         self.b = (b_high << 32) | b_low
 
     def compute_signature(self, text: str) -> list[int]:

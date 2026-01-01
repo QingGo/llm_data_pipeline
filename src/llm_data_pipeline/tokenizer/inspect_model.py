@@ -1,3 +1,10 @@
+"""
+Inspect SentencePiece Model.
+
+A utility script to load a trained SentencePiece model and inspect its vocabulary and piece IDs.
+Useful for debugging and verifying model content.
+"""
+
 import sentencepiece as spm
 
 if __name__ == "__main__":

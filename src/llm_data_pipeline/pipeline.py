@@ -1,3 +1,10 @@
+"""
+LLM Data Pipeline Orchestrator.
+
+This script serves as the main entry point for the pipeline. It orchestrates the execution
+of various data processing steps (ingest, clean, dedup, etc.) based on user configuration.
+"""
+
 import argparse
 import json
 from pathlib import Path
@@ -23,6 +30,13 @@ from llm_data_pipeline.tokenizer.train import run_train_tokenizer
 
 
 def main():
+    """
+    Main entry point for the LLM Data Pipeline Orchestrator.
+
+    Parses command-line arguments to determine which steps to run, configures logging and Ray,
+    and executes the selected pipeline steps in order. It also handles resuming from a specific step
+    and maintains execution statistics.
+    """
     p = argparse.ArgumentParser("LLM Data Pipeline Orchestrator")
     p.add_argument(
         "--steps",
@@ -94,7 +108,8 @@ def main():
                 logger.error(f"Unknown step: {r}")
                 return
 
-    # Handle resume-from
+    # Handle resume-from logic:
+    # If a resume step is provided, skip all steps prior to it in the execution list.
     if args.resume_from:
         start_idx = -1
         for i, (name, _) in enumerate(steps_to_run):
@@ -125,7 +140,7 @@ def main():
     # Initialize stats dictionary to store all step statistics
     pipeline_stats = {}
 
-    # Load existing stats if they exist
+    # Load existing stats if they exist to preserve history when resuming or running partial steps
     stats_file = out_dir / "pipeline_stats.json"
     if stats_file.exists():
         try:

@@ -1,5 +1,14 @@
 # pyright: reportAttributeAccessIssue=false
 
+"""
+PII Redaction Step.
+
+This module handles Personal Identifiable Information (PII) redaction.
+It uses a two-stage approach:
+1. Fast regex-based redaction for structured PII (emails, IPs, phones, SSNs).
+2. (Optional) Slow NER-based redaction for names using Microsoft Presidio and spaCy.
+"""
+
 import argparse
 from dataclasses import dataclass
 
@@ -340,6 +349,7 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
     )
 
     # 1) Fast structured PII redaction + gating + ner_lang
+    # Uses `StructuredPIIRedactor` to identify and redact emails, IPs, etc.
     logger.info("PII: Starting structured PII redaction")
     ds = ds.map_batches(
         StructuredPIIRedactor,

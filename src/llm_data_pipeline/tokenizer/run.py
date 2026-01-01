@@ -1,3 +1,11 @@
+"""
+Tokenization and Packing Step.
+
+This module handles the tokenization of text data using a trained SentencePiece model
+and packs the tokens into fixed-length sequences (e.g., 4096 tokens) for training.
+It supports streaming packing with optional EOS insertion and metadata generation.
+"""
+
 import argparse
 import glob
 import json
@@ -25,6 +33,9 @@ _SP = None
 
 
 def _get_sp(model_path: str):
+    """
+    Loads the SentencePiece model singleton.
+    """
     global _SP
     if _SP is None:
         import sentencepiece as spm
@@ -38,6 +49,10 @@ def _get_sp(model_path: str):
 
 
 def _resolve_eos_id(sp) -> int:
+    """
+    Resolves the EOS token ID from the SentencePiece model.
+    Tries `eos_id()`, then common tokens like `</s>`, `<eos>`, `<EOS>`.
+    """
     # sentencepiece usually has eos_id() for </s>
     eos = sp.eos_id()
     if eos is not None and eos >= 0:
@@ -208,6 +223,10 @@ def write_parquet_shard(
     seq_len: int,
     compression: str = "zstd",
 ) -> None:
+    """
+    Writes a list of packed rows to a Parquet file.
+    Converts list of lists into a pyarrow Table with FixedSizeList columns.
+    """
     input_chunks = [r["input_ids"] for r in rows]
     arr = np.asarray(input_chunks, dtype=np.int32)  # shape [n, L]
     if arr.ndim != 2 or arr.shape[1] != seq_len:
@@ -471,6 +490,9 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
 
 
 def add_args(ap: argparse.ArgumentParser):
+    """
+    Adds Tokenize step specific arguments.
+    """
     # Note: Base args like --output-base are added by core.
     # We add overrides or specific args.
     ap.add_argument("--spm_model", type=str, default=None, help="Path to SPM model")

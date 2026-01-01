@@ -1,3 +1,10 @@
+"""
+MinHash Step Entry Point.
+
+This module defines the Ray Data processing step for computing MinHash signatures for documents.
+It wraps the `VectorizedMinHash` computation and maps it over the dataset.
+"""
+
 import os
 
 import ray.data as rd
@@ -13,11 +20,19 @@ from llm_data_pipeline.dedup.minhash import VectorizedMinHash
 
 
 class MinHashCompute:
+    """
+    Callable class for MinHash computation in Ray Data.
+    Initializes the VectorizedMinHash object once per actor/worker.
+    """
+
     def __init__(self):
         # Initialized once per worker process (or actor)
         self.vm = VectorizedMinHash(k=128)
 
     def __call__(self, batch: dict) -> dict:
+        """
+        Computes signatures for a batch of texts.
+        """
         texts = batch.get("text", [])
         out_sigs = []
         out_lens = []

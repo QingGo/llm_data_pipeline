@@ -1,3 +1,11 @@
+"""
+Global Deduplication Utilities.
+
+This module contains the core logic for Locality Sensitive Hashing (LSH) and graph-based deduplication.
+It includes functions for band hashing, generating candidate pairs, and finding connected components
+to identify and remove duplicate documents.
+"""
+
 import hashlib
 import itertools
 from typing import Any
@@ -8,12 +16,28 @@ import ray.data as rd
 
 # ---------- LSH banding (Map) ----------
 def band_hash(vals: list[int]) -> str:
-    # 稳定 hash：把 band 的 ints 打包成 bytes 再 sha1
+    """
+    Computes a stable hash for a given band (list of integers).
+    Uses SHA1 on the string representation of values.
+    """
     b = (",".join(map(str, vals))).encode("utf-8")
     return hashlib.sha1(b).hexdigest()
 
 
 def make_band_rows(row: dict[str, Any], rows_per_band: int) -> list[dict[str, Any]]:
+    """
+    Generates band rows for LSH.
+
+    Splits the MinHash signature into multiple bands. Each band is hashed to create a bucket key.
+    Documents falling into the same bucket (same band hash) are candidate duplicates.
+
+    Args:
+        row: Input row containing 'signature', 'doc_id', etc.
+        rows_per_band: Number of signature components per band.
+
+    Returns:
+        List of dictionary objects representing the bands for this document.
+    """
     if "signature" not in row:
         raise ValueError(
             f"Row is missing required 'signature' field. "
@@ -49,8 +73,13 @@ def make_band_rows(row: dict[str, Any], rows_per_band: int) -> list[dict[str, An
 # ---------- bucket -> edges (Reduce) ----------
 def bucket_to_pairs(batch) -> list[dict[str, Any]]:
     """
-    batch: 一个桶内的记录（同 band_id, band_hash）
-    输出：该桶内所有 doc_id 两两组合的边列表
+    Generates candidate duplicate pairs from a bucket.
+
+    Args:
+        batch: A batch of records in the same bucket (same band_id and band_hash).
+
+    Returns:
+        A list of edges (pairs of doc_ids) representing potential duplicates.
     """
     # batch 是 pyarrow table / pandas df 都行，这里用最通用的转 dict
     docs = []
@@ -72,22 +101,30 @@ def bucket_to_pairs(batch) -> list[dict[str, Any]]:
 
 # ---------- union-find connected components ----------
 class UnionFind:
+    """Disjoint Set Union (DSU) data structure for connected components."""
+
     def __init__(self):
         self.parent = {}
 
     def find(self, x):
+        """Finds the representative (root) of the set containing x with path compression."""
         self.parent.setdefault(x, x)
         if self.parent[x] != x:
             self.parent[x] = self.find(self.parent[x])
         return self.parent[x]
 
     def union(self, a, b):
+        """Unions the sets containing a and b."""
         ra, rb = self.find(a), self.find(b)
         if ra != rb:
             self.parent[rb] = ra
 
 
 def pick_canonical(members: list[tuple[str, int, int]]) -> str:
+    """
+    Selects the canonical document from a cluster of duplicates.
+    Preference: Higher timestamp -> Larger length -> Lexicographical doc_id.
+    """
     # members: [(doc_id, ts, length), ...]
     members.sort(key=lambda x: (x[1], x[2], x[0]), reverse=True)
     return members[0][0]
@@ -97,7 +134,23 @@ def ray_global_dedup(
     docs_ds: rd.Dataset,
     rows_per_band: int = 4,
 ):
-    # Map: 展开 band 行
+    """
+    Performs global deduplication using LSH and Connected Components on Ray Data.
+
+    1. Expands each document into multiple band rows (Map phase).
+    2. Groups by band hash to find buckets (Shuffle phase).
+    3. Generates candidate pairs (edges) within buckets (Reduce phase).
+    4. Computes connected components on the graph of candidate pairs.
+    5. Selects one canonical document per component to keep.
+
+    Args:
+        docs_ds: Input dataset with signatures.
+        rows_per_band: LSH parameter controlling sensitivity.
+
+    Returns:
+        Dict containing stats and the set of 'keep' doc_ids.
+    """
+    # Map: Expand band rows
     band_rows = docs_ds.flat_map(lambda r: make_band_rows(r, rows_per_band))
 
     # For Ray Data >= 2.5, we need a different approach

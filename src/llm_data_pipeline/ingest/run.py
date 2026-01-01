@@ -1,6 +1,8 @@
-"""WET.gz 数据抽取运行入口
+"""
+CommonCrawl WET.gz Ingestion Step.
 
-发现输入文件、分发到 Ray 任务进行解析，并输出为 Parquet。
+This module handles the discovery and extraction of text data from CommonCrawl WET.gz files.
+It distributes the processing tasks across a Ray cluster and outputs the raw text to Parquet files.
 """
 
 import argparse
@@ -22,7 +24,16 @@ from llm_data_pipeline.ingest.step import IngestConfig, extract_wet_gz_file
 
 
 def discover_files(data_dir: Path, pattern: str) -> list[Path]:
-    """按模式枚举数据目录下的文件，过滤隐藏文件"""
+    """
+    Enumerates files in the data directory matching the given pattern, filtering out hidden files.
+
+    Args:
+        data_dir: The directory to search in.
+        pattern: The glob pattern to match (e.g., "**/*.wet.gz").
+
+    Returns:
+        A list of Path objects for the found files.
+    """
     logger = PipelineLogger.get()
     if not data_dir.exists():
         logger.warning(f"Data dir {data_dir} does not exist.")
@@ -44,7 +55,24 @@ def add_args(p: argparse.ArgumentParser) -> None:
 
 
 def run_ingest(config: PipelineConfig, **kwargs) -> dict:
-    """Pipeline entry point"""
+    """
+    Executes the ingestion step of the pipeline.
+
+    This step scans for WET.gz files, distributes the extraction work via Ray,
+    and saves the extracted text as Parquet files.
+
+    Args:
+        config: The global pipeline configuration.
+        **kwargs: specific arguments for ingest:
+            - data_dir: Input directory (default: ./data/commoncrawl/)
+            - pattern: File pattern (default: **/*.wet.gz)
+            - min_text_chars: Min chars per doc
+            - max_text_chars: Max chars per doc
+            - max_docs_per_file: Max docs to extract per WET file (0=all)
+
+    Returns:
+        A dictionary containing execution statistics.
+    """
     logger = PipelineLogger.get()
 
     total_start = time.time()
@@ -99,11 +127,12 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
         }
 
     process_start = time.time()
-    # dataset from items
+    # Create Ray dataset from the list of files
     ds_files = rd.from_items([{"path": str(p.absolute())} for p in files])
 
     compute = ActorPoolStrategy(size=taskpool_size) if taskpool_size else None
 
+    # Distribute the extraction task across the cluster
     ds_docs = ds_files.flat_map(
         lambda r: extract_wet_gz_file(Path(r["path"]), cfg),
         compute=compute,
