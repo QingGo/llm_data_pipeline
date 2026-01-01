@@ -59,7 +59,7 @@ def _process_minhash(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
     batch_size = config.batch_size
 
     ds_sig = ds.map_batches(
-        MinHashCompute,
+        MinHashCompute,  # type: ignore
         batch_size=batch_size,
         compute=ActorPoolStrategy(size=concurrency),
     )

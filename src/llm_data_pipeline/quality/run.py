@@ -70,7 +70,7 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
     logger.info("Initializing LanguageFilter with model...")
     logger.info("Starting language detection and scoring...")
     ds_scored = ds.map(
-        QualityMapper,
+        QualityMapper,  # type: ignore
         fn_constructor_args=(model_path, langs, threshold),
         compute=ActorPoolStrategy(min_size=1, max_size=os.cpu_count() or 4),
     )
