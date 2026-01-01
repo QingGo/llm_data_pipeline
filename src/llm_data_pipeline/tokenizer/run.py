@@ -2,6 +2,7 @@ import argparse
 import glob
 import json
 import os
+import time
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any
@@ -397,7 +398,6 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     """Tokenize and pack step"""
 
     logger = PipelineLogger.get()
-    import time
 
     total_start = time.time()
 

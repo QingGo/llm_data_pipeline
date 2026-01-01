@@ -4,6 +4,7 @@
 """
 
 import argparse
+import time
 from pathlib import Path
 
 import ray.data as rd
@@ -45,7 +46,6 @@ def add_args(p: argparse.ArgumentParser) -> None:
 def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point"""
     logger = PipelineLogger.get()
-    import time
 
     total_start = time.time()
 

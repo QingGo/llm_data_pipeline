@@ -10,8 +10,8 @@ from llm_data_pipeline.core import (
     setup_logging,
     silence_ray_loggers,
 )
-from llm_data_pipeline.dedup.minhash_step import run_minhash
-from llm_data_pipeline.dedup.run import run_clustering
+from llm_data_pipeline.dedup.run_clustering import run_clustering
+from llm_data_pipeline.dedup.run_minhash import run_minhash
 from llm_data_pipeline.export.run import run_export
 
 # Import steps (will refactor these modules next)

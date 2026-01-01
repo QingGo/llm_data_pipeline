@@ -1,12 +1,9 @@
 import hashlib
 import itertools
-from pathlib import Path
 from typing import Any
 
 import ray
 import ray.data as rd
-
-from llm_data_pipeline.dedup.minhash import char_ngrams, datasketch_minhash
 
 
 # ---------- LSH banding (Map) ----------
@@ -106,7 +103,7 @@ def ray_global_dedup(
     # For Ray Data >= 2.5, we need a different approach
     # First, materialize the band rows to get all the data
     all_band_rows = band_rows.take_all()
-    
+
     # Create a dictionary to group band rows by (band_id, band_hash)
     buckets = {}
     for row in all_band_rows:
@@ -114,7 +111,7 @@ def ray_global_dedup(
         if key not in buckets:
             buckets[key] = []
         buckets[key].append(row)
-    
+
     # Generate edges from each bucket
     all_edges = []
     for bucket_rows in buckets.values():
@@ -122,13 +119,14 @@ def ray_global_dedup(
         class SimpleBatch:
             def __init__(self, rows):
                 self.rows = rows
+
             def to_pylist(self):
                 return self.rows
-        
+
         batch = SimpleBatch(bucket_rows)
         edges = bucket_to_pairs(batch)
         all_edges.extend(edges)
-    
+
     # Create a dataset from the edges
     edges_ds = ray.data.from_items(all_edges)
 
@@ -151,7 +149,7 @@ def ray_global_dedup(
     select_cols = ["doc_id", "length"]
     if "ts" in available_cols:
         select_cols.append("ts")
-    
+
     docs_meta = docs_ds.select_columns(select_cols).take_all()
     comp: dict[str, list[tuple[str, int, int]]] = {}
     for r in docs_meta:
@@ -179,50 +177,3 @@ def ray_global_dedup(
         "dedup_rate": dedup_rate,
         "keep_set": keep,
     }
-
-
-if __name__ == "__main__":
-    from llm_data_pipeline.core import PipelineLogger, setup_logging
-
-    # 配置本地日志
-    logger = setup_logging(Path("./outputs/test"), "dedup")
-    logger = PipelineLogger.get()
-
-    # 1. 准备测试数据
-    docs = [
-        {"doc_id": "doc1", "text": "今天天气不错，适合出去玩", "ts": 100},
-        {"doc_id": "doc2", "text": "今天天气真好，适合去郊游", "ts": 101},  # 近似
-        {"doc_id": "doc3", "text": "完全不同的一句话", "ts": 102},
-        {"doc_id": "doc4", "text": "今天天气不错，适合出去玩", "ts": 103},  # 完全重复
-    ]
-
-    # 2. 计算 MinHash 签名
-    # 注意：实际生产中这一步通常是一个 map_batches 算子
-    # 这里为了演示 ray_global_dedup，手动先算好 signature
-    processed_docs = []
-    for d in docs:
-        # 生成 shingles
-        shingles = char_ngrams(d["text"], n=5)
-        # 生成 MinHash 对象
-        m = datasketch_minhash(shingles, k=128)
-        # 提取签名 (hashvalues)
-        d["signature"] = m.hashvalues.tolist()
-        d["length"] = len(d["text"])
-        processed_docs.append(d)
-
-    # 3. 启动 Ray 并创建 Dataset
-    ray.init()
-    ds = ray.data.from_items(processed_docs)
-
-    # 4. 执行去重
-    # rows_per_band 越小，band 数越多，召回率越高（越容易判定为相似），但也越慢
-    result = ray_global_dedup(ds, rows_per_band=4)
-
-    # 5. 打印结果
-    logger.info("=== Dedup Result ===")
-    logger.info(f"Total docs: {result['total_docs']}")
-    logger.info(f"Kept docs: {result['kept_docs']}")
-    logger.info(f"Removed docs: {result['removed_docs']}")
-    logger.info(f"Dedup rate: {result['dedup_rate']:.2%}")
-    logger.info(f"Duplicate pairs sample: {result['duplicate_pairs_sample']}")
-    logger.info(f"Keep set size: {len(result['keep_set'])}")

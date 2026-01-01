@@ -1,6 +1,5 @@
-"""清洗阶段运行入口：读取 ingest 结果并按规则过滤输出"""
-
 import argparse
+import time
 
 import ray.data as rd
 
@@ -57,7 +56,6 @@ def run_clean(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point for cleaning"""
 
     logger = PipelineLogger.get()
-    import time
 
     total_start = time.time()
 

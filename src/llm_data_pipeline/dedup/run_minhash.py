@@ -1,4 +1,3 @@
-import argparse
 import os
 
 import ray.data as rd
@@ -36,7 +35,7 @@ class MinHashCompute:
         return batch
 
 
-def add_args(p: argparse.ArgumentParser) -> None:
+def add_args(p) -> None:
     pass
 
 
