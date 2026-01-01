@@ -1,4 +1,5 @@
 import argparse
+import json
 from pathlib import Path
 
 from llm_data_pipeline.clean.run import run_clean
@@ -22,9 +23,6 @@ from llm_data_pipeline.tokenizer.train import run_train_tokenizer
 
 
 def main():
-    # Re-import json to ensure it's available in this function
-    import json
-
     p = argparse.ArgumentParser("LLM Data Pipeline Orchestrator")
     p.add_argument(
         "--steps",
@@ -44,7 +42,7 @@ def main():
 
     # Step specific consolidated args (can be expanded)
     p.add_argument("--langs", default="zh,en", help="Languages for quality filter")
-    
+
     # PII specific args
     p.add_argument("--enable-ner", action="store_true", help="Enable PERSON NER stage (default: disabled)")
     p.add_argument("--text-col", default="text", help="Text column name (default: text)")

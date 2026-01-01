@@ -14,13 +14,11 @@ from datasets import load_dataset
 from llm_data_pipeline.core import (
     PipelineConfig,
     PipelineLogger,
+    get_directory_stats,
     resolve_io_paths,
     run_step_entrypoint,
+    validate_input_path,
 )
-
-# ... (inside run_tokenize)
-# ...
-
 
 _SP = None
 
@@ -397,12 +395,12 @@ def _process_tokenize(input_path: str, output_path: str, config: PipelineConfig,
 
 def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     """Tokenize and pack step"""
-    from llm_data_pipeline.core import get_directory_stats, validate_input_path
+
     logger = PipelineLogger.get()
     import time
-    
+
     total_start = time.time()
-    
+
     # Helper to resolve generic args
     def get_arg(name, default=None):
         return kwargs.get(name, default)
@@ -423,22 +421,22 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
     else:
         # Default
         output_path = str(output_dir_base / "token_packing_parquet")
-    
+
     # Validate input path
     validate_input_path(input_path, "tokenize")
-    
+
     # Get input stats
     input_file_count, input_total_size = get_directory_stats(Path(input_path))
-    
+
     # Core processing
     meta, input_count, output_count = _process_tokenize(input_path, output_path, config, **kwargs)
-    
+
     # Get output stats
     output_file_count, output_total_size = get_directory_stats(Path(output_path))
-    
+
     # Calculate total duration
     total_duration = time.time() - total_start
-    
+
     # Prepare comprehensive stats in actual execution order
     stats = {
         "step_name": "tokenize",
@@ -466,9 +464,9 @@ def run_tokenize(config: PipelineConfig, **kwargs) -> dict:
         "duration_seconds": total_duration,
         "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
     }
-    
+
     logger.info(f"Tokenize step completed with stats: {stats}")
-    
+
     return stats
 
 

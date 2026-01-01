@@ -7,6 +7,7 @@ import pyarrow.parquet as pq
 from llm_data_pipeline.core import (
     PipelineConfig,
     PipelineLogger,
+    get_directory_stats,
     resolve_io_paths,
     run_step_entrypoint,
     validate_input_path,
@@ -63,7 +64,6 @@ def run_export(config: PipelineConfig, **kwargs) -> dict:
     files_processed = 0
 
     # Get input stats
-    from llm_data_pipeline.core import get_directory_stats
     input_file_count, input_total_size = get_directory_stats(input_dir)
 
     # Calculate output_count (token chunks) by reading the first file's schema

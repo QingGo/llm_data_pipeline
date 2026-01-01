@@ -252,9 +252,16 @@ class PresidioPersonNER:
 
         # Process only rows that need NER processing and have supported languages
         # Filter rows first to reduce processing overhead
-        rows_to_process = [(i, t, lang) for i, (t, lang, do_ner) in enumerate(zip(text, langs, need, strict=True)) 
-                          if do_ner and isinstance(t, str) and t and 
-                          isinstance(lang, str) and self.cfg.supported_langs and lang in self.cfg.supported_langs]
+        rows_to_process = [
+            (i, t, lang)
+            for i, (t, lang, do_ner) in enumerate(zip(text, langs, need, strict=True))
+            if do_ner
+            and isinstance(t, str)
+            and t
+            and isinstance(lang, str)
+            and self.cfg.supported_langs
+            and lang in self.cfg.supported_langs
+        ]
 
         # Process rows in bulk with optimized handling
         for i, t, lang in rows_to_process:
@@ -262,7 +269,7 @@ class PresidioPersonNER:
                 # Optimize: Only analyze if text is long enough to contain a name
                 if len(t) < 3:  # Skip very short texts
                     continue
-                
+
                 results = self.analyzer.analyze(
                     text=t,
                     entities=self.entities,
@@ -284,34 +291,6 @@ class PresidioPersonNER:
         return batch.set_column(batch.schema.get_field_index(col), col, new_col)
 
 
-def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Ray Data + Arrow/RE2 + Presidio PII redaction to Parquet.")
-    p.add_argument(
-        "--input", default="outputs/dev/cleaned_parquet", help="Input parquet path (local://, s3://, gs://, etc.)"
-    )
-    p.add_argument("--output", default="outputs/dev/pii_parquet", help="Output parquet directory")
-    p.add_argument("--text-col", default="text", help="Text column name (default: text)")
-    p.add_argument(
-        "--lang-col", default="", help="Optional language column (e.g. lang). If missing/empty, heuristic en/zh."
-    )
-    p.add_argument(
-        "--num-blocks", type=int, default=0, help="Repartition to this many blocks (controls output file count)"
-    )
-    p.add_argument("--batch-size-structured", type=int, default=4096, help="Rows per batch for structured redaction")
-    p.add_argument("--batch-size-ner", type=int, default=256, help="Rows per batch for NER stage (smaller is safer)")
-    p.add_argument("--actors-ner", type=int, default=8, help="Actor pool size for Presidio NER stage")
-    p.add_argument("--enable-ner", action="store_true", help="Enable PERSON NER stage (default: disabled)")
-    p.add_argument("--keep-stats", action="store_true", help="Keep pii_has_* columns in output")
-    p.add_argument("--supported-langs", default="en,zh", help="NER supported langs, comma-separated (default: en,zh)")
-    p.add_argument("--spacy-en", default="en_core_web_sm", help="spaCy model for English")
-    p.add_argument("--spacy-zh", default="zh_core_web_sm", help="spaCy model for Chinese")
-    p.add_argument(
-        "--ner-score-threshold", type=float, default=0.0, help="Presidio analyze score threshold (lower => more recall)"
-    )
-    p.add_argument("--ray-address", default=None, help="Ray cluster address (auto/local)")
-    return p.parse_args()
-
-
 def add_args(p: argparse.ArgumentParser) -> None:
     """添加 PII 特有参数"""
     p.add_argument("--text-col", default="text", help="Text column name (default: text)")
@@ -328,13 +307,12 @@ def add_args(p: argparse.ArgumentParser) -> None:
     )
     p.add_argument("--batch-size-structured", type=int, default=4096, help="Rows per batch for structured redaction")
     p.add_argument("--batch-size-ner", type=int, default=256, help="Rows per batch for NER stage (smaller is safer)")
-    p.add_argument("--actors-ner", type=int, default=8, help="Actor pool size for Presidio NER stage")
 
 
 def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:
     """Core PII redaction processing function"""
     logger = PipelineLogger.get()
-    
+
     # Build PII Config
     logger.info("PII: Building PII config")
     text_col = kwargs.get("text_col", "text")
@@ -350,7 +328,7 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
     batch_size_structured = kwargs.get("batch_size_structured", 4096)
     batch_size_ner = kwargs.get("batch_size_ner", 256)
     actors_ner = kwargs.get("actors_ner", 4)  # Reduced default from 16 to 4 for faster initialization
-    
+
     cfg = Config(
         text_col=text_col,
         lang_col=lang_col,
@@ -441,20 +419,14 @@ def _process_pii(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset
     existing = [c for c in drop_cols if schema and hasattr(schema, "names") and c in schema.names]
     if existing:
         ds_out = ds_out.drop_columns(existing)
-    
+
     return ds_out
 
 
 def run_pii(config: PipelineConfig, **kwargs) -> dict:
     """Pipeline entry point for PII redaction"""
-    stats = step_wrapper(
-        step_name="pii",
-        process_func=_process_pii,
-        config=config,
-        input_step_name="quality",
-        **kwargs
-    )
-    
+    stats = step_wrapper(step_name="pii", process_func=_process_pii, config=config, input_step_name="quality", **kwargs)
+
     return stats
 
 

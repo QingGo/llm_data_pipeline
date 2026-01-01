@@ -3,5 +3,9 @@
   "venvPath": ".",
   "venv": ".venv",
   "pythonVersion": "3.13",
-  "typeCheckingMode": "basic"
+  "typeCheckingMode": "basic",
+  "reportUnusedImport": "error",
+  "reportUnusedVariable": "error",
+  "reportUnusedFunction": "warning",
+  "reportUnusedClass": "warning"
 }

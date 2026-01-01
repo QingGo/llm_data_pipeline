@@ -79,18 +79,21 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
     logger.info("Language detection completed. Calculating statistics...")
     # Calculate language distribution
     lang_distribution = ds_scored.groupby("lang").count()
-    logger.info(f"Language distribution: {lang_distribution}")
+    # Convert to list of dictionaries for better logging
+    lang_dist_list = [dict(row) for row in lang_distribution.take_all()]
+    logger.info(f"Language distribution: {lang_dist_list}")
 
     # Calculate keep/filter statistics by language
     lang_keep_stats = ds_scored.groupby(["lang", "quality_keep"]).count()
-    logger.info(f"Language keep statistics: {lang_keep_stats}")
+    # Convert to list of dictionaries for better logging
+    lang_keep_list = [dict(row) for row in lang_keep_stats.take_all()]
+    logger.info(f"Language keep statistics: {lang_keep_list}")
 
     logger.info("Filtering documents based on language and confidence...")
     # Filter
     ds_kept = ds_scored.filter(lambda r: r["quality_keep"])
 
     kept_count = ds_kept.count()
-    orig_count = ds.count()
 
     # Calculate statistics
     filtered_count = orig_count - kept_count
@@ -99,20 +102,20 @@ def _process_quality(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dat
     logger.info(f"Done. Kept {kept_count} / {orig_count} docs ({keep_rate:.2%}). Filtered out {filtered_count} docs.")
 
     # Log examples of kept and rejected docs
-    if kept_count > 0:
-        kept_sample = ds_kept.take(3)
-        logger.info("Examples of kept docs:")
-        for i, doc in enumerate(kept_sample):
-            logger.info(f"  Kept {i + 1}: lang={doc['lang']}, score={doc['lang_score']:.4f}")
+    # if kept_count > 0:
+    #     kept_sample = ds_kept.take(3)
+    #     logger.info("Examples of kept docs:")
+    #     for i, doc in enumerate(kept_sample):
+    #         logger.info(f"  Kept {i + 1}: lang={doc['lang']}, score={doc['lang_score']:.4f}")
 
-    if filtered_count > 0:
-        rejected_sample = ds_scored.filter(lambda r: not r["quality_keep"]).take(3)
-        logger.info("Examples of rejected docs:")
-        for i, doc in enumerate(rejected_sample):
-            logger.info(
-                f"  Rejected {i + 1}: lang={doc['lang']}, score={doc['lang_score']:.4f}, "
-                f"text_start={doc['text'][:50]}..."
-            )
+    # if filtered_count > 0:
+    #     rejected_sample = ds_scored.filter(lambda r: not r["quality_keep"]).take(3)
+    #     logger.info("Examples of rejected docs:")
+    #     for i, doc in enumerate(rejected_sample):
+    #         logger.info(
+    #             f"  Rejected {i + 1}: lang={doc['lang']}, score={doc['lang_score']:.4f}, "
+    #             f"text_start={doc['text'][:50]}..."
+    #         )
 
     return ds_kept
 

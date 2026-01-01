@@ -3,7 +3,6 @@ from dataclasses import dataclass
 # 修复fasttext的numpy 2.0兼容性问题
 # 解决方案：直接替换fasttext模块中的predict方法实现
 import fasttext
-import fasttext.FastText
 import fasttext.FastText as FastText_module
 import numpy as np
 from fasttext.FastText import _FastText

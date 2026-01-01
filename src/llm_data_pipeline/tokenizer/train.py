@@ -30,8 +30,7 @@ def write_shards_with_ray(
     if "text" not in schema.names:
         raise ValueError(f"'text' column not found. columns={schema.names}")
 
-    ds = ds.select_columns(["text"]).filter(lambda r: r["text"] is not None and str(r["text"]).strip() != "")
-
+    # Filter out None or empty text values
     ds = ds.select_columns(["text"]).filter(lambda r: r["text"] is not None and str(r["text"]).strip() != "")
 
     if limit > 0:
@@ -40,17 +39,26 @@ def write_shards_with_ray(
 
     # Get input count before further processing
     input_count = ds.count()
+    logger.info(f"  Found {input_count} valid text records for training")
+
+    if input_count == 0:
+        raise ValueError("No valid text records found in the parquet files.")
 
     if max_chars > 0:
         ds = ds.map(lambda r: {"text": str(r["text"])[:max_chars]})
 
+    # 确保分片数量不超过实际数据量，避免生成大量空文件
+    actual_num_shards = min(num_shards, input_count)
+    logger.info(f"  Using {actual_num_shards} shards (adjusted from {num_shards} based on data count)")
+
     # 把数据切成多个 shard，分别写文件，避免并发抢同一个文件句柄
-    ds = ds.repartition(num_shards)
-    splits = ds.split(num_shards, equal=True)
+    ds = ds.repartition(actual_num_shards)
+    splits = ds.split(actual_num_shards, equal=True)
 
     @ray.remote
-    def _write_one(i: int, split_ds, out_dir_str: str) -> str:
+    def _write_one(i: int, split_ds, out_dir_str: str) -> tuple[str, int]:
         p = Path(out_dir_str) / f"train_{i:04d}.txt"
+        written_lines = 0
         with p.open("w", encoding="utf-8") as f:
             for batch in split_ds.iter_batches(batch_size=4096):
                 texts = batch["text"]
@@ -59,9 +67,12 @@ def write_shards_with_ray(
                     s = str(t).replace("\n", " ").strip()
                     if s:
                         f.write(s + "\n")
-        return str(p)
+                        written_lines += 1
+        logger.info(f"  Wrote {written_lines} lines to shard {i:04d}")
+        return str(p), written_lines
 
-    paths = ray.get([_write_one.remote(i, s, str(out_dir.absolute())) for i, s in enumerate(splits)])
+    results = ray.get([_write_one.remote(i, s, str(out_dir.absolute())) for i, s in enumerate(splits)])
+    paths = [path for path, _ in results]
     return paths, input_count
 
 
@@ -78,7 +89,7 @@ def train_sentencepiece_py(
     from contextlib import contextmanager
 
     from llm_data_pipeline.core import PipelineLogger
-    
+
     logger = PipelineLogger.get()
     model_prefix.parent.mkdir(parents=True, exist_ok=True)
 
@@ -113,49 +124,49 @@ def train_sentencepiece_py(
         # Create temporary files for stdout and stderr
         stdout_fd, stdout_path = tempfile.mkstemp()
         stderr_fd, stderr_path = tempfile.mkstemp()
-        
+
         # Save original file descriptors
         original_stdout = os.dup(1)
         original_stderr = os.dup(2)
-        
+
         try:
             # Redirect stdout and stderr to temporary files
             os.dup2(stdout_fd, 1)
             os.dup2(stderr_fd, 2)
-            
+
             # Close the temporary file descriptors (we'll read from the files later)
             os.close(stdout_fd)
             os.close(stderr_fd)
-            
+
             yield stdout_path, stderr_path
         finally:
             # Restore original stdout and stderr
             os.dup2(original_stdout, 1)
             os.dup2(original_stderr, 2)
-            
+
             # Close the saved file descriptors
             os.close(original_stdout)
             os.close(original_stderr)
 
     # Redirect stdout and stderr from sentencepiece C++ code to logger
     logger.info(f"Starting SentencePiece training with model_type={model_type}, vocab_size={vocab_size}")
-    
+
     try:
         # Use file descriptor redirection to capture C++ output
         with redirect_cpp_output() as (stdout_path, stderr_path):
             # Run SentencePiece training
             spm.SentencePieceTrainer.Train(**kwargs)
-        
+
         # Read captured output from temporary files
         with open(stdout_path) as f:
             stdout_output = f.read()
         with open(stderr_path) as f:
             stderr_output = f.read()
-        
+
         # Clean up temporary files
         os.unlink(stdout_path)
         os.unlink(stderr_path)
-        
+
         # Log captured output
         if stdout_output.strip():
             # Only log stdout if it's not just empty or whitespace
@@ -169,24 +180,56 @@ def train_sentencepiece_py(
                     if "LOG(INFO)" in stripped_line and (".cc(" in stripped_line or ".cpp(" in stripped_line):
                         continue
                     # Skip all configuration logs
-                    if any(keyword in stripped_line for keyword in [
-                        "trainer_spec", "input:", "model_prefix:", "vocab_size:", 
-                        "model_type:", "character_coverage:", "byte_fallback:", 
-                        "split_by_", "remove_extra_whitespaces:", 
-                        "normalization_rule_name:", "num_threads:", "unk_id:", 
-                        "bos_id:", "eos_id:", "pad_id:", "input_sentence_size:", 
-                        "shuffle_input_sentence:", "input_format:", "self_test_sample_size:",
-                        "seed_sentencepiece_size:", "shrinking_factor:", "max_sentence_length:",
-                        "num_sub_iterations:", "max_sentencepiece_length:", "split_digits:",
-                        "pretokenization_delimiter:", "treat_whitespace_as_suffix:",
-                        "allow_whitespace_only_pieces:", "required_chars:",
-                        "vocabulary_output_piece_score:", "train_extremely_large_corpus:",
-                        "seed_sentencepieces_file:", "hard_vocab_limit:", "use_all_vocab:",
-                        "unk_piece:", "bos_piece:", "eos_piece:", "pad_piece:",
-                        "unk_surface:", "enable_differential_privacy:",
-                        "differential_privacy_noise_level:", "differential_privacy_clipping_threshold:",
-                        "normalizer_spec", "denormalizer_spec", "}",
-                    ]):
+                    if any(
+                        keyword in stripped_line
+                        for keyword in [
+                            "trainer_spec",
+                            "input:",
+                            "model_prefix:",
+                            "vocab_size:",
+                            "model_type:",
+                            "character_coverage:",
+                            "byte_fallback:",
+                            "split_by_",
+                            "remove_extra_whitespaces:",
+                            "normalization_rule_name:",
+                            "num_threads:",
+                            "unk_id:",
+                            "bos_id:",
+                            "eos_id:",
+                            "pad_id:",
+                            "input_sentence_size:",
+                            "shuffle_input_sentence:",
+                            "input_format:",
+                            "self_test_sample_size:",
+                            "seed_sentencepiece_size:",
+                            "shrinking_factor:",
+                            "max_sentence_length:",
+                            "num_sub_iterations:",
+                            "max_sentencepiece_length:",
+                            "split_digits:",
+                            "pretokenization_delimiter:",
+                            "treat_whitespace_as_suffix:",
+                            "allow_whitespace_only_pieces:",
+                            "required_chars:",
+                            "vocabulary_output_piece_score:",
+                            "train_extremely_large_corpus:",
+                            "seed_sentencepieces_file:",
+                            "hard_vocab_limit:",
+                            "use_all_vocab:",
+                            "unk_piece:",
+                            "bos_piece:",
+                            "eos_piece:",
+                            "pad_piece:",
+                            "unk_surface:",
+                            "enable_differential_privacy:",
+                            "differential_privacy_noise_level:",
+                            "differential_privacy_clipping_threshold:",
+                            "normalizer_spec",
+                            "denormalizer_spec",
+                            "}",
+                        ]
+                    ):
                         continue
                     # Skip meta piece logs
                     if "Adding meta_piece:" in stripped_line:
@@ -202,7 +245,7 @@ def train_sentencepiece_py(
     except Exception as e:
         logger.error(f"SentencePiece training failed: {e}")
         raise
-    
+
     logger.info("SentencePiece training completed successfully")
 
 
@@ -249,8 +292,9 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
     """Train tokenizer step"""
     logger = PipelineLogger.get()
     import time
+
     total_start = time.time()
-    
+
     input_path_base, output_dir_base = resolve_io_paths(config, "train_tokenizer", "clustering")
 
     def get_arg(name, default=None):
@@ -296,9 +340,23 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
     )
     logger.info(f"  wrote {len(txt_paths)} shard files into {shard_dir}")
 
+    # Validate that we have non-empty text files for training
+    non_empty_txt_paths = []
+    for txt_path in txt_paths:
+        try:
+            if Path(txt_path).stat().st_size > 0:
+                non_empty_txt_paths.append(txt_path)
+        except FileNotFoundError:
+            logger.warning(f"Shard file not found: {txt_path}")
+
+    if not non_empty_txt_paths:
+        raise ValueError(f"No non-empty text shard files found. All {len(txt_paths)} shard files are empty.")
+
+    logger.info(f"  Found {len(non_empty_txt_paths)} non-empty shard files for training")
+
     logger.info("Step 2) Train SentencePiece...")
     train_sentencepiece_py(
-        input_txt_paths=txt_paths,
+        input_txt_paths=non_empty_txt_paths,
         model_prefix=model_prefix,
         vocab_size=vocab_size,
         input_sentence_size=input_sentence_size,
@@ -317,9 +375,10 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
 
     # Get input and output stats
     from llm_data_pipeline.core import get_directory_stats
+
     input_file_count, input_total_size = get_directory_stats(input_path)
     output_file_count = 2  # model and vocab file
-    
+
     # Calculate output total size
     model_size = spm_model_path.stat().st_size if spm_model_path.exists() else 0
     vocab_path = Path(str(model_prefix) + ".vocab")
@@ -342,7 +401,7 @@ def run_train_tokenizer(config: PipelineConfig, **kwargs) -> dict:
         "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_end - total_start)),
         "process_duration_seconds": process_end - process_start,
         # Add tokenizer-specific stats
-        **token_stats
+        **token_stats,
     }
 
     return stats

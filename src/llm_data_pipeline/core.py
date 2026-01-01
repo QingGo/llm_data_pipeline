@@ -1,10 +1,9 @@
 import argparse
-import dataclasses
 import logging
 import sys
 import time
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, fields
 from pathlib import Path
 from typing import Any
 
@@ -27,26 +26,16 @@ class PipelineConfig:
     model_path: str | None = None
     input: str | None = None
     threshold: float | None = None
-    # Step-specific config storage
-    _step_configs: dict[str, dict] = field(default_factory=dict, init=False)
-
-    def get_step_config(self, step_name: str) -> dict:
-        """Gets the configuration for a specific step."""
-        return self._step_configs.get(step_name, {})
-
-    def set_step_config(self, step_name: str, config: dict) -> None:
-        """Sets the configuration for a specific step."""
-        self._step_configs[step_name] = config
 
     def get(self, name: str, default: Any = None) -> Any:
-        """Gets a configuration value, checking both the main config and step-specific configs."""
+        """Gets a configuration value."""
         return getattr(self, name, default)
 
     @classmethod
     def from_args(cls, args: argparse.Namespace) -> "PipelineConfig":
         """Creates a PipelineConfig instance from argparse arguments."""
         # Extract main config fields
-        main_fields = [f.name for f in dataclasses.fields(cls) if f.init]
+        main_fields = [f.name for f in fields(cls) if f.init]
         main_kwargs = {}
 
         for fld in main_fields:
@@ -63,7 +52,7 @@ class PipelineConfig:
 
 class PipelineLogger:
     """Singleton logger for the pipeline.
-    
+
     For Ray actors, use the get_actor_logger() function instead.
     """
 
@@ -72,7 +61,7 @@ class PipelineLogger:
     @classmethod
     def get(cls) -> logging.Logger:
         """Gets the singleton logger instance.
-        
+
         Use this in regular code, but not in Ray actors.
         """
         if cls._instance is None:
@@ -131,35 +120,35 @@ def setup_logging(output_dir: Path, step_name: str = "Pipeline") -> logging.Logg
 def get_actor_logger(name: str = "llm_data_pipeline.actor") -> logging.Logger:
     """
     Get a logger suitable for use in Ray actors.
-    
+
     This logger writes to the same file as the main pipeline logger but uses
     a separate logger instance that works correctly in distributed environments.
-    
+
     Args:
         name: Logger name prefix
-    
+
     Returns:
         A properly configured logger for use in Ray actors
     """
     import logging
-    
+
     logger = logging.getLogger(name)
     logger.setLevel(logging.INFO)
-    
+
     # Clear any existing handlers to avoid duplicates
     logger.handlers.clear()
     logger.propagate = False
-    
+
     # Add only file handler from root logger
     root_file_handler = None
     for h in logging.getLogger().handlers:
         if isinstance(h, logging.FileHandler):
             root_file_handler = h
             break
-    
+
     if root_file_handler:
         logger.addHandler(root_file_handler)
-    
+
     return logger
 
 
@@ -312,10 +301,10 @@ def read_parquet(input_path: Path, config: PipelineConfig) -> tuple[rd.Dataset, 
     """
     logger = PipelineLogger.get()
     logger.info(f"Reading parquet from {input_path}")
-    
+
     # Get input file statistics
     input_file_count, input_total_size = get_directory_stats(input_path)
-    
+
     ds = rd.read_parquet(str(input_path.absolute()))
 
     if config.limit > 0:
@@ -328,12 +317,12 @@ def read_parquet(input_path: Path, config: PipelineConfig) -> tuple[rd.Dataset, 
 def write_parquet(ds: rd.Dataset, output_path: Path, logger: logging.Logger) -> tuple[int, int]:
     """
     Writes a Ray Dataset to parquet files.
-    
+
     Args:
         ds: Ray Dataset to write
         output_path: Path to write to
         logger: Logger instance
-        
+
     Returns:
         A tuple of (file_count, total_size_bytes) for output files
     """
@@ -348,10 +337,10 @@ def write_parquet(ds: rd.Dataset, output_path: Path, logger: logging.Logger) -> 
     output_path.mkdir(parents=True, exist_ok=True)
     logger.info(f"Writing results to {output_path}...")
     ds.write_parquet(str(output_path.absolute()))
-    
+
     # Get output file statistics
     output_file_count, output_total_size = get_directory_stats(output_path)
-    
+
     return output_file_count, output_total_size
 
 
@@ -365,7 +354,7 @@ def step_wrapper(
 ) -> dict[str, Any]:
     """
     Wrapper function for pipeline steps to reduce code duplication.
-    
+
     This function encapsulates common step logic:
     1. Path resolution
     2. Input validation
@@ -373,7 +362,7 @@ def step_wrapper(
     4. Core processing
     5. Data writing with output statistics
     6. Comprehensive statistics collection
-    
+
     Args:
         step_name: Name of the current step
         process_func: Core processing function that takes (dataset, config, **kwargs) and returns processed dataset
@@ -381,26 +370,26 @@ def step_wrapper(
         input_step_name: Name of the previous step (for path resolution)
         output_subdir: Optional output subdirectory name, defaults to f"{step_name}_parquet"
         **kwargs: Additional arguments to pass to the processing function
-        
+
     Returns:
         Comprehensive statistics dictionary including input/output stats, counts, and durations
-    
+
     Raises:
         Exception: If any error occurs during step execution, with detailed context
     """
     logger = PipelineLogger.get()
     total_start = time.time()
-    
+
     stats: dict[str, Any] = {
         "step_name": step_name,
         "input_path": "",
         "output_path": "",
         "status": "failed",
     }
-    
+
     try:
         logger.info(f"{step_name}: Starting {step_name} processing")
-        
+
         # 1. Resolve paths
         logger.info(f"{step_name}: Resolving paths")
         try:
@@ -412,7 +401,7 @@ def step_wrapper(
         except Exception as e:
             logger.error(f"{step_name}: Path resolution failed: {e}")
             raise RuntimeError(f"{step_name}: Failed to resolve input/output paths: {e}") from e
-        
+
         # 2. Validate input path
         logger.info(f"{step_name}: Validating input path: {input_path}")
         try:
@@ -420,7 +409,7 @@ def step_wrapper(
         except Exception as e:
             logger.error(f"{step_name}: Input validation failed: {e}")
             raise RuntimeError(f"{step_name}: Input path validation failed: {e}") from e
-        
+
         # 3. Read data with input stats
         logger.info(f"{step_name}: Reading parquet data")
         try:
@@ -433,7 +422,7 @@ def step_wrapper(
         except Exception as e:
             logger.error(f"{step_name}: Data reading failed: {e}")
             raise RuntimeError(f"{step_name}: Failed to read input data: {e}") from e
-        
+
         # 4. Core processing
         logger.info(f"{step_name}: Starting core processing")
         process_start = time.time()
@@ -444,7 +433,7 @@ def step_wrapper(
         except Exception as e:
             logger.error(f"{step_name}: Core processing failed: {e}", exc_info=True)
             raise RuntimeError(f"{step_name}: Core processing failed: {e}") from e
-        
+
         # 5. Write output with output stats
         logger.info(f"{step_name}: Writing output")
         try:
@@ -457,37 +446,41 @@ def step_wrapper(
         except Exception as e:
             logger.error(f"{step_name}: Output writing failed: {e}", exc_info=True)
             raise RuntimeError(f"{step_name}: Failed to write output data: {e}") from e
-        
+
         # 6. Calculate total duration and prepare stats
         total_end = time.time()
         total_duration = total_end - total_start
-        
-        stats.update({
-            "input_file_count": input_file_count,
-            "input_total_size": input_total_size,
-            "input_count": input_count,
-            "output_file_count": output_file_count,
-            "output_total_size": output_total_size,
-            "output_count": output_count,
-            "duration_seconds": total_duration,
-            "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
-            "process_duration_seconds": process_end - process_start,
-            "status": "success",
-        })
-        
+
+        stats.update(
+            {
+                "input_file_count": input_file_count,
+                "input_total_size": input_total_size,
+                "input_count": input_count,
+                "output_file_count": output_file_count,
+                "output_total_size": output_total_size,
+                "output_count": output_count,
+                "duration_seconds": total_duration,
+                "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+                "process_duration_seconds": process_end - process_start,
+                "status": "success",
+            }
+        )
+
         logger.info(f"{step_name}: Processing completed in {total_duration:.2f} seconds")
         logger.info(f"{step_name}: Final stats: {stats}")
-        
+
         return stats
     except Exception as e:
         # Ensure we have duration in stats even if step fails
         total_end = time.time()
         total_duration = total_end - total_start
-        stats.update({
-            "duration_seconds": total_duration,
-            "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
-            "error": str(e),
-        })
+        stats.update(
+            {
+                "duration_seconds": total_duration,
+                "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_duration)),
+                "error": str(e),
+            }
+        )
         logger.error(f"{step_name}: Step failed with stats: {stats}")
         raise
 
@@ -606,22 +599,22 @@ def validate_model_path(model_path: str | Path, step_name: str) -> str:
 def get_directory_stats(dir_path: Path, file_pattern: str = "*.parquet") -> tuple[int, int]:
     """
     Get the number of files and total size of files matching the pattern in the directory.
-    
+
     Args:
         dir_path: Path to the directory to check
         file_pattern: Pattern to match files (default: "*.parquet")
-        
+
     Returns:
         A tuple of (file_count, total_size_bytes)
     """
     if not dir_path.exists() or not dir_path.is_dir():
         return 0, 0
-    
+
     # Get all files matching the pattern
     files = list(dir_path.glob(file_pattern))
     file_count = len(files)
-    
+
     # Calculate total size
     total_size = sum(f.stat().st_size for f in files if f.is_file())
-    
+
     return file_count, total_size

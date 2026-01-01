@@ -37,7 +37,7 @@ class MinHashCompute:
 
 
 def add_args(p: argparse.ArgumentParser) -> None:
-    p.add_argument("--input", default=None, help="Input directory")
+    pass
 
 
 def _process_minhash(ds: rd.Dataset, config: PipelineConfig, **kwargs) -> rd.Dataset:

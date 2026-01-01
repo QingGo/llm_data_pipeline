@@ -12,6 +12,7 @@ from ray.data import ActorPoolStrategy
 from llm_data_pipeline.core import (
     PipelineConfig,
     PipelineLogger,
+    get_directory_stats,
     resolve_io_paths,
     run_step_entrypoint,
     write_parquet,
@@ -116,13 +117,10 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
     write_parquet(ds_docs, output_path, logger)
 
     doc_count = ds_docs.count()
-    logger.info(f"files = {len(files)}")
-    logger.info(f"docs_count = {doc_count}")
     process_end = time.time()
     total_end = time.time()
 
     # Get output stats
-    from llm_data_pipeline.core import get_directory_stats
     output_file_count, output_total_size = get_directory_stats(output_path)
 
     # Prepare comprehensive stats in the same format as other steps
@@ -131,13 +129,13 @@ def run_ingest(config: PipelineConfig, **kwargs) -> dict:
         "input_path": str(data_dir),
         "input_file_count": input_file_count,
         "input_total_size": input_total_size,
-        "input_count": 0,        # Ingest stage creates new records, doesn't process existing ones
+        "input_count": 0,  # Ingest stage creates new records, doesn't process existing ones
         "output_path": str(output_path),
         "output_file_count": output_file_count,
         "output_total_size": output_total_size,
         "output_count": doc_count,
         "files_processed": input_file_count,  # Keep for backward compatibility
-        "docs_ingested": doc_count,     # Keep for backward compatibility
+        "docs_ingested": doc_count,  # Keep for backward compatibility
         "duration_seconds": total_end - total_start,
         "duration_human": time.strftime("%H:%M:%S", time.gmtime(total_end - total_start)),
         "process_duration_seconds": process_end - process_start,
